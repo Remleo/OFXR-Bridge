@@ -2531,9 +2531,8 @@ int main(int argc, char** argv) {
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
             "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
-            "d3d11-bridge-late-paint|steamvr-own-time|promise-shown-time|inline-promise|
-            "panel-input]
-";
+            "d3d11-bridge-late-paint|steamvr-own-time|promise-shown-time|inline-promise|"
+            "panel-input]\n";
         return EXIT_FAILURE;
     }
     g_panel_input_mode = argc == 4 && std::strcmp(argv[3], "panel-input") == 0;
