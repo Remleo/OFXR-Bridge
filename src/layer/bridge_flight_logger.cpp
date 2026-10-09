@@ -128,6 +128,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::reprojection_angle: return "reprojection_angle";
     case BridgeFlightOperation::app_locate_views: return "app_locate_views";
     case BridgeFlightOperation::test_runtime_device: return "test_runtime_device";
+    case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
     }
     return "unknown";
 }

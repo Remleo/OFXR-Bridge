@@ -304,6 +304,13 @@ enum class BridgeFlightOperation : std::uint32_t {
     // 5 the panel script's controls set (XRFG_TEST_RUNTIME_PANEL_ROW; b the
     // step, c 1 pressed or 0 released).
     test_runtime_device,
+    // A history capture that found its ring slot still read or written on the
+    // GPU and waited for it (D3D12HistoryCaptureWait). result is the
+    // capture's HRESULT: 0 when the wait freed the slot, ERROR_BUSY when the
+    // limit ran out and the frame lost its history as before. a the
+    // swapchain, b microseconds waited, c the limit in microseconds << 32 |
+    // the image index. Nothing is written for a capture whose slot was free.
+    history_capture_wait,
 };
 
 struct BridgeFlightToken {
