@@ -260,6 +260,15 @@ enum class BridgeFlightOperation : std::uint32_t {
     //   4  the panel shown on a turned-over controller: a= the hand, 1 left,
     //      2 right
     //   5  the panel hidden again
+    //   6  a setting changed from the panel: a= the PanelSetting, b= the
+    //      choice, c= 0 taken live, 1 kept for the next game start, -1
+    //      refused
+    //   7  the panel's controls (a second action set): a= 1 made, with b=
+    //      the profiles it knows and c= 1 in the exclusive mode, or a= 0
+    //      with b= the result that refused it. Selector 2's a is then the
+    //      tier the bindings reached: 2 with the controls, 1 the grips
+    //      alone, 0 the game's own; selector 3's c says whether the attach
+    //      took the controls' set
     status_panel,
     // How far the runtime will turn a frame to show it, written for every
     // frame of a generated pair as it is handed over: the angle between the

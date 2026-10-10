@@ -30,7 +30,17 @@ public:
     // `status` is what the status panel shows, given whenever status_wanted()
     // said it was due; the panel keeps its last image otherwise.
     void application_frame(const XrFrameEndInfo* info,
-                           const StatusPanelInput* status = nullptr) noexcept;
+                           const StatusPanelInput* status = nullptr,
+                           const PanelCursor* cursor = nullptr) noexcept;
+    // The hand the panel sits on while it is shown by the gesture (0 left, 1
+    // right), else -1: the hand whose controls edit it. Any thread.
+    [[nodiscard]] int interactive_hand() const noexcept;
+    // Counts the panel's appearances and disappearances, so a cursor can be
+    // dropped with the panel that showed it. Any thread.
+    [[nodiscard]] std::uint64_t panel_visibility_generation() const noexcept;
+    // A repaint at the next frame rather than the next quarter second: the
+    // cursor moved.
+    void request_panel_repaint() noexcept;
     // Whether the status panel is up, or about to be, and its next repaint
     // is due: the caller gathers a StatusPanelInput for application_frame
     // only then, a few times a second at most. Any thread.

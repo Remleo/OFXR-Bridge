@@ -83,6 +83,8 @@ void applied(std::uint64_t id, std::uint64_t revision, bool enabled, long error)
     auto& c = control(); std::scoped_lock lock(c.mutex);
     if (auto it = c.sessions.find(id); it != c.sessions.end()) it->second = {revision, enabled, error};
 }
+bool set_runtime_key(const wchar_t* key, const wchar_t* value) { return write(L"ofxr", key, value); }
+void bump_revision() { auto& c = control(); std::scoped_lock lock(c.mutex); ++c.revision; }
 bool logging_setting() { return GetPrivateProfileIntW(L"diagnostics", L"logging_enabled", 0, ini().c_str()) != 0; }
 bool set_logging_setting(bool enabled) { return write(L"diagnostics", L"logging_enabled", enabled ? L"1" : L"0"); }
 int overlay_setting() {

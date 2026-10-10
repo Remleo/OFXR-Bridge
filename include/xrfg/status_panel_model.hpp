@@ -8,6 +8,7 @@
 #include "xrfg/pose.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -194,6 +195,10 @@ struct StatusPanelInput {
     std::uint32_t promise_periods{};
     PanelGraphics graphics{PanelGraphics::d3d12};
     std::string runtime;
+    // The layer's panel controls (a thumbstick and trigger on the controller
+    // the panel sits on) are bound for this session: the panel then lists
+    // its settings below the status, for editing with them.
+    bool controls_bound{};
 };
 
 enum class PanelTone : std::uint8_t { normal, dim, good, warn, bad, accent };
@@ -202,7 +207,86 @@ struct PanelLine {
     std::string label;
     std::string text;
     PanelTone tone{PanelTone::normal};
+    // A setting the cursor stands on, drawn on a bar.
+    bool highlighted{};
 };
+
+// Editing from the panel. With a controller turned over, its thumbstick
+// moves a cursor through the settings listed below the status and changes
+// the one it stands on; its trigger applies the change. All of it is pure
+// here: the layer reads the inputs and writes the settings.
+enum class PanelSetting : std::uint8_t {
+    frames,        // 2X or 3X
+    method,        // OFXR or DLSS Frame Generation
+    native_scale,  // DLSS Frame Generation's resolution
+    native_camera, // the camera's motion fitted and handed to NGX
+    flow,          // FidelityFX, or NVIDIA at a preset
+    flow_scale,    // the flow's input resolution
+    both_ways,     // NVIDIA flow both ways
+    ofxr_mode,     // interpolate, the hybrid, extrapolate
+    pipeline,      // deep or shallow
+    pause,         // generation running or paused
+};
+struct PanelEditable {
+    PanelSetting setting{};
+    std::string label;
+    std::vector<std::string> choices;
+    int current{};
+    // Whether a change takes effect in the running session or at the next
+    // game start, whether it can be changed here at all, and a word on why.
+    bool live{true};
+    bool available{true};
+    std::string note;
+};
+// The settings as the tray asks for them now (StatusPanelInput::asked), in
+// the order the panel lists them: the method's own rows follow it.
+[[nodiscard]] std::vector<PanelEditable> panel_editables(const StatusPanelInput& input);
+
+enum class PanelCommand : std::uint8_t { none, up, down, left, right, confirm };
+struct PanelInputSample {
+    // The thumbstick, -1 to 1 each way, up and right positive; the trigger.
+    float x{};
+    float y{};
+    bool confirm{};
+    // The hand's inputs are bound and read; without it nothing moves.
+    bool active{};
+};
+// A step on crossing the deadzone, re-armed below the lower level, and
+// repeating after a hold; the trigger on its press.
+inline constexpr float kPanelDeadzone = 0.6F;
+inline constexpr float kPanelRearm = 0.3F;
+inline constexpr std::int64_t kPanelRepeatDelayNs = 500'000'000;
+inline constexpr std::int64_t kPanelRepeatPeriodNs = 300'000'000;
+// A staged value not applied within this long is dropped.
+inline constexpr std::int64_t kPanelStageTimeoutNs = 6'000'000'000;
+class PanelNavigator {
+public:
+    [[nodiscard]] PanelCommand feed(const PanelInputSample& sample, std::int64_t now_ns) noexcept;
+    void reset() noexcept { *this = PanelNavigator{}; }
+private:
+    int held_x_{};
+    int held_y_{};
+    std::int64_t held_since_{-1};
+    std::int64_t last_repeat_{-1};
+    bool confirm_down_{};
+};
+struct PanelCursor {
+    int row{-1};     // the setting it stands on; -1 while it is not shown
+    int staged{-1};  // a choice staged on that row, -1 none
+    std::int64_t staged_at_ns{-1};
+};
+struct PanelChange {
+    PanelSetting setting{};
+    int choice{};
+};
+// The first command shows the cursor; up and down move it, dropping any
+// staged choice; left and right stage the previous or next choice of an
+// available row; confirm returns the staged change and clears it, and does
+// nothing without one.
+[[nodiscard]] std::optional<PanelChange> panel_cursor_apply(
+    PanelCursor& cursor, const std::vector<PanelEditable>& editables, PanelCommand command,
+    std::int64_t now_ns) noexcept;
+void panel_cursor_expire(PanelCursor& cursor, std::int64_t now_ns) noexcept;
 
 struct StatusPanelText {
     // One word or two for the panel's corner: GENERATING, FALLBACK, PAUSED,
@@ -214,11 +298,15 @@ struct StatusPanelText {
 
 [[nodiscard]] std::string describe_asked(const PanelMethod& method);
 [[nodiscard]] std::string describe_running(const StatusPanelInput& input);
-[[nodiscard]] StatusPanelText status_panel_text(const StatusPanelInput& input);
+// With a cursor, the settings block carries it: its row highlighted, a
+// staged choice shown beside the current one.
+[[nodiscard]] StatusPanelText status_panel_text(const StatusPanelInput& input,
+                                                const PanelCursor* cursor = nullptr);
 
-// The panel's texture. Twice as wide as tall: a 2:1 quad shows it unscaled.
+// The panel's texture, cut to its lines when drawn: the status alone uses
+// the top half; the settings, when the controls are bound, the rest.
 inline constexpr std::uint32_t kStatusPanelWidth = 1024;
-inline constexpr std::uint32_t kStatusPanelHeight = 512;
+inline constexpr std::uint32_t kStatusPanelHeight = 768;
 
 // Premultiplied alpha. `linear` for a UNORM swapchain, which the runtime
 // reads as linear light: the colours are converted, so the panel looks the
@@ -232,6 +320,7 @@ inline constexpr std::uint32_t kStatusPanelHeight = 512;
     const StatusPanelInput& input,
     bool bgra,
     bool linear,
-    std::uint32_t* used_height = nullptr);
+    std::uint32_t* used_height = nullptr,
+    const PanelCursor* cursor = nullptr);
 
 }  // namespace xrfg

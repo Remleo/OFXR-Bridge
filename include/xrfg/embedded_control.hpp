@@ -25,6 +25,11 @@ bool request(Settings settings); // persists only owned keys; false means INI wr
 std::uint64_t attach();
 void detach(std::uint64_t id);
 void applied(std::uint64_t id, std::uint64_t revision, bool enabled, long error);
+// The status panel's own writes: one `[ofxr]` key of the layer's ini, and a
+// revision bump so every session re-reads what a control change re-reads
+// (the hybrid, the mesh, the synthetics' pose).
+bool set_runtime_key(const wchar_t* key, const wchar_t* value);
+void bump_revision();
 bool logging_setting();
 bool set_logging_setting(bool enabled); // the recorder follows its INI live
 int overlay_setting();

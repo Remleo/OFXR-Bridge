@@ -31,9 +31,14 @@ public:
     ManualArmControl& operator=(const ManualArmControl&) = delete;
     [[nodiscard]] bool stop_requested() const noexcept;
     [[nodiscard]] bool pause_requested() const noexcept;
+    // The status panel's pause from inside the game: sets or resets the
+    // tray's pause event, which the tray reads back. False without one.
+    bool set_pause(bool paused) noexcept;
 private:
     void* event_{};
     void* pause_event_{};
+    void* pause_control_{};
+    std::wstring pause_name_;
     bool managed_{};
 };
 

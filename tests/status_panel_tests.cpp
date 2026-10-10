@@ -416,6 +416,123 @@ int main(int argc, char** argv) {
                 "a game at half the refresh needs no pace line");
         require(line_labelled(text, "Guides").text == "used on 100% of pairs", "no resets, no mention");
 
+        // Editing from the panel. The settings list follows the method asked
+        // for; a row that cannot be changed here says why.
+        input = generating(tray_default(), tray_default());
+        input.controls_bound = true;
+        {
+            auto rows = panel_editables(input);
+            require(rows.size() == 8 && rows[0].setting == PanelSetting::frames && rows[0].current == 0 &&
+                        rows[1].setting == PanelSetting::method && rows[1].current == 0 &&
+                        rows[2].setting == PanelSetting::flow && rows[2].current == 2 &&
+                        rows[3].setting == PanelSetting::flow_scale && rows[3].current == 2 &&
+                        rows[4].setting == PanelSetting::both_ways &&
+                        rows[5].setting == PanelSetting::ofxr_mode && rows[5].current == 1 &&
+                        rows[6].setting == PanelSetting::pipeline && !rows[6].live,
+                    "OFXR editables");
+            require(rows.back().setting == PanelSetting::pause, "pause last");
+            auto through_interop = input;
+            through_interop.graphics = PanelGraphics::d3d11_interop;
+            require(!panel_editables(through_interop)[0].available, "3X not editable through the interop");
+            auto no_nvidia = input;
+            no_nvidia.nvidia_unavailable = true;
+            require(!panel_editables(no_nvidia)[2].available && panel_editables(no_nvidia)[2].choices.size() == 1,
+                    "flow fixed without NVIDIA");
+            PanelMethod native_asked;
+            native_asked.native = true;
+            native_asked.native_scale = 67;
+            native_asked.game_vectors = true;
+            auto native_input = generating(native_asked, native_asked);
+            native_input.controls_bound = true;
+            auto native_rows = panel_editables(native_input);
+            require(native_rows[2].setting == PanelSetting::native_scale && native_rows[2].current == 1 &&
+                        native_rows[3].setting == PanelSetting::native_camera && !native_rows[3].live &&
+                        std::none_of(native_rows.begin(), native_rows.end(),
+                                     [](const PanelEditable& row) { return row.setting == PanelSetting::flow; }),
+                    "native editables");
+        }
+        // The navigator: a step past the deadzone, nothing until the stick
+        // comes back under the re-arm level, repeats while held, and the
+        // trigger on its press alone.
+        {
+            PanelNavigator navigator;
+            const auto at = [](std::int64_t ms) { return ms * 1'000'000; };
+            require(navigator.feed({0.0f, 0.3f, false, true}, at(0)) == PanelCommand::none, "inside the deadzone");
+            require(navigator.feed({0.0f, 0.8f, false, true}, at(10)) == PanelCommand::up, "a step up");
+            require(navigator.feed({0.0f, 0.9f, false, true}, at(20)) == PanelCommand::none, "held, no repeat yet");
+            require(navigator.feed({0.0f, 0.9f, false, true}, at(600)) == PanelCommand::up, "a repeat after the delay");
+            require(navigator.feed({0.0f, 0.9f, false, true}, at(700)) == PanelCommand::none, "repeat period");
+            require(navigator.feed({0.0f, 0.9f, false, true}, at(950)) == PanelCommand::up, "repeat again");
+            require(navigator.feed({0.0f, 0.4f, false, true}, at(1000)) == PanelCommand::none, "between the levels");
+            require(navigator.feed({0.0f, 0.8f, false, true}, at(1010)) == PanelCommand::none, "not re-armed yet");
+            require(navigator.feed({0.0f, 0.0f, false, true}, at(1020)) == PanelCommand::none, "released");
+            require(navigator.feed({-0.9f, 0.1f, false, true}, at(1030)) == PanelCommand::left, "left");
+            require(navigator.feed({-0.9f, 0.1f, true, true}, at(1040)) == PanelCommand::confirm, "trigger pressed");
+            require(navigator.feed({-0.9f, 0.1f, true, true}, at(1050)) == PanelCommand::none, "trigger held");
+            require(navigator.feed({0.0f, 0.0f, false, false}, at(1060)) == PanelCommand::none, "inactive");
+            require(navigator.feed({0.0f, -0.9f, false, true}, at(1070)) == PanelCommand::down, "down after a reset");
+        }
+        // The cursor: the first command only shows it; up and down wrap and
+        // drop a staged choice; left and right stage; the trigger applies a
+        // staged choice and nothing else; a stage times out.
+        {
+            const auto rows = panel_editables(input);
+            PanelCursor cursor;
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::down, 0) && cursor.row == 0, "first shows");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::up, 0) && cursor.row == static_cast<int>(rows.size()) - 1,
+                    "up wraps");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::down, 0) && cursor.row == 0, "down wraps");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::confirm, 0), "nothing staged, nothing applied");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 100) && cursor.staged == 1, "staged 3X");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 100) && cursor.staged == -1,
+                    "back round to the current choice stages nothing");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::left, 100) && cursor.staged == 1, "left wraps");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::down, 100) && cursor.staged == -1, "moving drops");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::up, 100) && cursor.row == 0, "back up");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 200) && cursor.staged == 1, "staged again");
+            panel_cursor_expire(cursor, 200 + kPanelStageTimeoutNs - 1);
+            require(cursor.staged == 1, "within the timeout");
+            panel_cursor_expire(cursor, 200 + kPanelStageTimeoutNs + 1);
+            require(cursor.staged == -1, "timed out");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 300) && cursor.staged == 1, "staged once more");
+            const auto change = panel_cursor_apply(cursor, rows, PanelCommand::confirm, 400);
+            require(change && change->setting == PanelSetting::frames && change->choice == 1 && cursor.staged == -1,
+                    "applied 3X");
+            auto through_interop = input;
+            through_interop.graphics = PanelGraphics::d3d11_interop;
+            const auto fixed_rows = panel_editables(through_interop);
+            PanelCursor fixed_cursor{0, -1, -1};
+            require(!panel_cursor_apply(fixed_cursor, fixed_rows, PanelCommand::right, 0) && fixed_cursor.staged == -1,
+                    "an unavailable row stages nothing");
+        }
+        // The text and the pixels with a cursor: the settings block, its
+        // highlighted row in chevrons, a staged choice in the accent tone
+        // and on the bar, and more rows than the status alone.
+        {
+            text = status_panel_text(input);
+            require(line_labelled(text, "Settings").text == "turn the stick to choose a setting", "settings header");
+            require(line_labelled(text, "Per frame").text == "2X" && line_labelled(text, "Buffering").text ==
+                        "deep (from the next game start)", "settings rows");
+            PanelCursor cursor{0, -1, -1};
+            text = status_panel_text(input, &cursor);
+            require(line_labelled(text, "Per frame").text == "< 2X >" && line_labelled(text, "Per frame").highlighted,
+                    "highlighted row");
+            cursor.staged = 1;
+            text = status_panel_text(input, &cursor);
+            require(line_labelled(text, "Per frame").text == "2X > 3X, trigger to apply" &&
+                        line_labelled(text, "Per frame").tone == PanelTone::accent, "staged row");
+            std::uint32_t plain_used = 0, edited_used = 0;
+            const auto plain = rasterize_status_panel(kStatusPanelWidth, kStatusPanelHeight, input, false, false, &plain_used);
+            const auto edited = rasterize_status_panel(kStatusPanelWidth, kStatusPanelHeight, input, false, false,
+                                                       &edited_used, &cursor);
+            require(plain_used == edited_used && plain_used > 136 + 8 * 22 + 8, "the settings add rows");
+            const std::uint32_t highlight = 0xff000000u | 40u | (54u << 8) | (86u << 16);
+            require(std::count(plain.begin(), plain.end(), highlight) == 0 &&
+                        std::count(edited.begin(), edited.end(), highlight) > 1000,
+                    "the cursor's bar is drawn");
+            input.controls_bound = false;
+        }
+
         // Frames and session lines.
         input = generating(tray_default(), tray_default());
         input.rates.repeats = 3.3f;

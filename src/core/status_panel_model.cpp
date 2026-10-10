@@ -283,7 +283,157 @@ std::string describe_running(const StatusPanelInput& input) {
     return engine_text(engine, input.running) + shape_text(input.running);
 }
 
-StatusPanelText status_panel_text(const StatusPanelInput& input) {
+std::vector<PanelEditable> panel_editables(const StatusPanelInput& input) {
+    std::vector<PanelEditable> rows;
+    const PanelMethod& asked = input.asked;
+    {
+        // Not "Frames": the status has a line of that name.
+        PanelEditable frames{PanelSetting::frames, "Per frame", {"2X", "3X"}, asked.frames > 2 ? 1 : 0};
+        if (input.graphics == PanelGraphics::d3d11_interop) {
+            frames.available = false;
+            frames.note = "not through the D3D11 interop";
+        } else if (asked.native && input.native_single_frame) {
+            frames.available = false;
+            frames.note = "this GPU's DLSS Frame Generation makes one frame";
+        } else if (input.triple_fixed) {
+            frames.live = false;
+            frames.note = "from the next game start";
+        }
+        rows.push_back(std::move(frames));
+    }
+    {
+        PanelEditable method{PanelSetting::method, "Method", {"OFXR", "DLSS Frame Generation"},
+                             asked.native ? 1 : 0};
+        if (!input.native_available && !asked.native) {
+            method.available = false;
+            method.note = "DLSS Frame Generation is unavailable here";
+        }
+        rows.push_back(std::move(method));
+    }
+    if (asked.native) {
+        rows.push_back({PanelSetting::native_scale, "Resolution", {"50%", "67%", "100%"},
+                        asked.native_scale >= 100 ? 2 : asked.native_scale >= 67 ? 1 : 0});
+        rows.push_back({PanelSetting::native_camera, "Camera", {"off", "on"}, asked.native_camera ? 1 : 0,
+                        false, true, "from the next game start"});
+    } else {
+        PanelEditable flow{PanelSetting::flow, "Flow",
+                           {"FidelityFX", "NVIDIA slow", "NVIDIA medium", "NVIDIA fast"},
+                           asked.flow == PanelFlow::fidelity_fx ? 0 : 1 + static_cast<int>(asked.preset)};
+        if (input.nvidia_unavailable) {
+            flow.choices = {"FidelityFX"};
+            flow.current = 0;
+            flow.available = false;
+            flow.note = "NVIDIA optical flow is unavailable here";
+        }
+        rows.push_back(std::move(flow));
+        rows.push_back({PanelSetting::flow_scale, "Flow scale", {"100%", "75%", "50%"},
+                        asked.flow_scale >= 100 ? 0 : asked.flow_scale >= 75 ? 1 : 2});
+        if (asked.flow == PanelFlow::nvidia) {
+            rows.push_back({PanelSetting::both_ways, "Both ways", {"off", "on"}, asked.both_ways ? 1 : 0});
+        }
+        // The hybrid follows at once; extrapolation shapes the session.
+        rows.push_back({PanelSetting::ofxr_mode, "Mode", {"interpolate", "hybrid", "extrapolate"},
+                        asked.extrapolate != 0 ? 2 : asked.hybrid ? 1 : 0, true, true,
+                        asked.extrapolate != 0 ? "" : ""});
+    }
+    rows.push_back({PanelSetting::pipeline, "Buffering", {"deep", "shallow"}, asked.deep ? 0 : 1, false, true,
+                    "from the next game start"});
+    rows.push_back({PanelSetting::pause, "Generation", {"running", "paused"}, input.paused ? 1 : 0});
+    return rows;
+}
+
+PanelCommand PanelNavigator::feed(const PanelInputSample& sample, std::int64_t now_ns) noexcept {
+    if (!sample.active) {
+        reset();
+        return PanelCommand::none;
+    }
+    PanelCommand command = PanelCommand::none;
+    if (sample.confirm && !confirm_down_) command = PanelCommand::confirm;
+    confirm_down_ = sample.confirm;
+    const float ax = std::abs(sample.x), ay = std::abs(sample.y);
+    int direction_x = 0, direction_y = 0;
+    if (ay >= ax && ay >= kPanelDeadzone) {
+        direction_y = sample.y > 0.0F ? 1 : -1;
+    } else if (ax > ay && ax >= kPanelDeadzone) {
+        direction_x = sample.x > 0.0F ? 1 : -1;
+    }
+    const auto step = [&](int x, int y) {
+        return y > 0 ? PanelCommand::up : y < 0 ? PanelCommand::down
+            : x > 0  ? PanelCommand::right : PanelCommand::left;
+    };
+    if (ax < kPanelRearm && ay < kPanelRearm) {
+        held_x_ = held_y_ = 0;
+        held_since_ = last_repeat_ = -1;
+    } else if (direction_x != 0 || direction_y != 0) {
+        if (held_x_ == 0 && held_y_ == 0) {
+            held_x_ = direction_x;
+            held_y_ = direction_y;
+            held_since_ = last_repeat_ = now_ns;
+            if (command == PanelCommand::none) command = step(direction_x, direction_y);
+        } else if (direction_x == held_x_ && direction_y == held_y_ &&
+                   now_ns - held_since_ >= kPanelRepeatDelayNs &&
+                   now_ns - last_repeat_ >= kPanelRepeatPeriodNs) {
+            last_repeat_ = now_ns;
+            if (command == PanelCommand::none) command = step(direction_x, direction_y);
+        }
+        // A new direction without a release waits for one.
+    }
+    return command;
+}
+
+std::optional<PanelChange> panel_cursor_apply(
+    PanelCursor& cursor, const std::vector<PanelEditable>& editables, PanelCommand command,
+    std::int64_t now_ns) noexcept {
+    if (editables.empty() || command == PanelCommand::none) return std::nullopt;
+    const int count = static_cast<int>(editables.size());
+    if (cursor.row < 0 || cursor.row >= count) {
+        // The first command brings the cursor up and does nothing else, so
+        // a glance at the panel never changes anything.
+        cursor.row = std::clamp(cursor.row, 0, count - 1);
+        cursor.staged = -1;
+        cursor.staged_at_ns = -1;
+        return std::nullopt;
+    }
+    switch (command) {
+    case PanelCommand::up:
+    case PanelCommand::down:
+        cursor.row = (cursor.row + (command == PanelCommand::down ? 1 : count - 1)) % count;
+        cursor.staged = -1;
+        cursor.staged_at_ns = -1;
+        break;
+    case PanelCommand::left:
+    case PanelCommand::right: {
+        const PanelEditable& row = editables[static_cast<std::size_t>(cursor.row)];
+        const int choices = static_cast<int>(row.choices.size());
+        if (!row.available || choices < 2) break;
+        const int from = cursor.staged >= 0 ? cursor.staged : std::clamp(row.current, 0, choices - 1);
+        const int to = (from + (command == PanelCommand::right ? 1 : choices - 1)) % choices;
+        cursor.staged = to == row.current ? -1 : to;
+        cursor.staged_at_ns = cursor.staged >= 0 ? now_ns : -1;
+        break;
+    }
+    case PanelCommand::confirm:
+        if (cursor.staged >= 0) {
+            const PanelChange change{editables[static_cast<std::size_t>(cursor.row)].setting, cursor.staged};
+            cursor.staged = -1;
+            cursor.staged_at_ns = -1;
+            return change;
+        }
+        break;
+    default:
+        break;
+    }
+    return std::nullopt;
+}
+
+void panel_cursor_expire(PanelCursor& cursor, std::int64_t now_ns) noexcept {
+    if (cursor.staged >= 0 && cursor.staged_at_ns >= 0 && now_ns - cursor.staged_at_ns > kPanelStageTimeoutNs) {
+        cursor.staged = -1;
+        cursor.staged_at_ns = -1;
+    }
+}
+
+StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCursor* cursor) {
     StatusPanelText text;
     // A fallback is the session running something other than what it was
     // started with; a newer choice in the tray is not one, only pending.
@@ -521,6 +671,36 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
         }
         lines.push_back({"Session", std::move(session), PanelTone::dim});
     }
+    // The settings, for the controls on the controller the panel sits on.
+    if (input.controls_bound) {
+        const auto editables = panel_editables(input);
+        const bool shown = cursor != nullptr && cursor->row >= 0;
+        lines.push_back({"Settings",
+                         shown ? "stick: choose and change, trigger: apply"
+                               : "turn the stick to choose a setting",
+                         PanelTone::dim});
+        for (std::size_t index = 0; index < editables.size(); ++index) {
+            const PanelEditable& row = editables[index];
+            const int choices = static_cast<int>(row.choices.size());
+            const bool highlighted = shown && cursor->row == static_cast<int>(index);
+            const int staged = highlighted && cursor->staged >= 0 && cursor->staged < choices ? cursor->staged : -1;
+            PanelLine line{row.label, {}, row.available ? PanelTone::normal : PanelTone::dim};
+            const std::string current =
+                choices > 0 ? row.choices[static_cast<std::size_t>(std::clamp(row.current, 0, choices - 1))]
+                            : std::string("-");
+            if (staged >= 0) {
+                line.text = current + " > " + row.choices[static_cast<std::size_t>(staged)] + ", trigger to apply";
+                line.tone = PanelTone::accent;
+            } else if (highlighted && row.available && choices > 1) {
+                line.text = "< " + current + " >";
+            } else {
+                line.text = current;
+            }
+            if (!row.note.empty()) line.text += " (" + row.note + ")";
+            line.highlighted = highlighted;
+            lines.push_back(std::move(line));
+        }
+    }
     return text;
 }
 
@@ -601,6 +781,7 @@ struct Rgba {
 constexpr Rgba kBackground{14, 18, 28, 232};
 constexpr Rgba kBorder{64, 74, 98, 255};
 constexpr Rgba kRule{48, 56, 76, 255};
+constexpr Rgba kHighlight{40, 54, 86, 255};
 constexpr Rgba kTones[]{
     {238, 241, 247, 255}, // normal
     {148, 158, 178, 255}, // dim
@@ -675,6 +856,14 @@ public:
         }
     }
 
+    // The bar behind the setting the cursor stands on.
+    void bar(int x0, int x1, int y0, int y1) {
+        const std::uint32_t fill = pack(kHighlight);
+        for (int y = std::max(y0, 0); y < std::min(y1, height_); ++y) {
+            const auto row = pixels_.begin() + static_cast<std::ptrdiff_t>(y) * width_;
+            std::fill(row + std::max(x0, 0), row + std::min(x1, width_), fill);
+        }
+    }
     void rule(int x0, int x1, int y, int thickness) {
         const std::uint32_t color = pack(kRule);
         for (int row = y; row < y + thickness && row < height_; ++row)
@@ -753,7 +942,8 @@ std::vector<std::uint32_t> rasterize_status_panel(
     const StatusPanelInput& input,
     bool bgra,
     bool linear,
-    std::uint32_t* used_height) {
+    std::uint32_t* used_height,
+    const PanelCursor* cursor) {
     // Laid out in units of a 512-wide panel: the body text is one font size
     // to a unit, the four big numbers two.
     if (width < 512 || width > 2048 || height < width / 2 || height > width) return {};
@@ -764,7 +954,7 @@ std::vector<std::uint32_t> rasterize_status_panel(
     const int margin = 12 * unit;
     const int w = static_cast<int>(width);
     const int h = static_cast<int>(height);
-    const StatusPanelText text = status_panel_text(input);
+    const StatusPanelText text = status_panel_text(input, cursor);
 
     // The rows come first, so the panel can be cut to them: a label column,
     // then text wrapped to the panel's width, as many as fit.
@@ -828,6 +1018,7 @@ std::vector<std::uint32_t> rasterize_status_panel(
 
     int y = rows_top;
     for (const Row& row : rows) {
+        if (row.line->highlighted) canvas.bar(margin / 2, w - margin / 2, y - unit, y + line_height - 2 * unit);
         if (row.first) canvas.text(margin, y, row.line->label, body, PanelTone::dim);
         canvas.text(value_x, y, row.text, body, row.line->tone);
         y += line_height;

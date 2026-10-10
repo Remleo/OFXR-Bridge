@@ -206,6 +206,7 @@ ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory
                 const std::wstring pause = std::wstring(kPauseSignalPrefix) +
                     std::wstring(value.substr(prefix.size()));
                 pause_event_ = OpenEventW(SYNCHRONIZE, FALSE, pause.c_str());
+                pause_name_ = pause;
             }
         }
     } catch (...) { managed_ = true; }
@@ -213,6 +214,13 @@ ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory
 ManualArmControl::~ManualArmControl() {
     if (event_) CloseHandle(event_);
     if (pause_event_) CloseHandle(pause_event_);
+    if (pause_control_) CloseHandle(pause_control_);
+}
+bool ManualArmControl::set_pause(bool paused) noexcept {
+    if (pause_name_.empty()) return false;
+    if (!pause_control_) pause_control_ = OpenEventW(EVENT_MODIFY_STATE, FALSE, pause_name_.c_str());
+    if (!pause_control_) return false;
+    return (paused ? SetEvent(pause_control_) : ResetEvent(pause_control_)) != FALSE;
 }
 bool ManualArmControl::pause_requested() const noexcept {
     // No pause control is not paused: an older tray, or a test without one.

@@ -575,6 +575,30 @@ struct Dispatch {
         XrAction grip_action{XR_NULL_HANDLE};
         std::array<XrPath, 2> hands{XR_NULL_PATH, XR_NULL_PATH};
         std::array<XrPath, 2> grips{XR_NULL_PATH, XR_NULL_PATH};
+        // The panel's controls (`[overlay] panel_input`): a second set, at a
+        // priority above any a game is likely to use, so that on a runtime
+        // that honours priorities the flipped hand's stick and trigger reach
+        // the panel alone while it is up. It is synced with that hand's
+        // subaction only then, and with no hand the game's input is as
+        // before. A runtime or profile that refuses it costs the controls
+        // and nothing else.
+        PFN_xrGetActionStateVector2f get_vector2f{};
+        PFN_xrGetActionStateBoolean get_boolean{};
+        XrActionSet input_set{XR_NULL_HANDLE};
+        XrAction navigate_action{XR_NULL_HANDLE};
+        XrAction confirm_action{XR_NULL_HANDLE};
+        struct ProfileBindings {
+            XrPath profile{XR_NULL_PATH};
+            std::array<XrPath, 2> navigate{XR_NULL_PATH, XR_NULL_PATH};
+            std::array<XrPath, 2> confirm{XR_NULL_PATH, XR_NULL_PATH};
+        };
+        std::vector<ProfileBindings> profiles;
+        // What an unknown profile is tried with.
+        ProfileBindings guess;
+        // While the panel is up, every game action set reads inactive: the
+        // only way to keep the game from the flipped hand's stick on a
+        // runtime that ignores priorities. Off by default.
+        bool exclusive{};
     } panel_gesture;
 };
 
@@ -851,6 +875,19 @@ struct SessionState {
     // xrSyncActions then follows.
     std::array<XrSpace, 2> panel_grip_spaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
     std::atomic<bool> panel_actions_attached{false};
+    // The panel's controls: whether their set was attached, the hand the
+    // panel sits on (-1 none; the xrSyncActions thread reads it, the
+    // end-frame thread writes it), the last inputs read on the sync thread,
+    // and the cursor the end-frame thread moves through the editables it
+    // cached at the last repaint.
+    std::atomic<bool> panel_input_attached{false};
+    std::atomic<int> panel_input_hand{-1};
+    std::mutex panel_input_mutex;
+    xrfg::PanelInputSample panel_input_sample;
+    xrfg::PanelNavigator panel_navigator;
+    xrfg::PanelCursor panel_cursor;
+    std::vector<xrfg::PanelEditable> panel_editables;
+    std::uint64_t panel_visibility_generation{};
     // What the panel says that nothing else keeps. Why the last frame passed
     // through (a GenerationPrepareReason) and when; whether the depth or 3X
     // fell back for the runtime's swapchain limit; where the DLSS guide
@@ -5183,6 +5220,24 @@ XrResult layer_get_instance_proc_addr_impl(
 // grip action to the application's input is decided then, because the
 // application suggests its bindings and attaches its action sets once, before
 // its first frame. The overlay follows the setting live after that.
+// `[overlay] panel_input`: hand (the default) edits the panel with the
+// flipped hand's stick and trigger, exclusive also keeps the game's action
+// sets out of xrSyncActions while the panel is up, off binds nothing.
+enum class PanelInputMode { off, hand, exclusive };
+[[nodiscard]] PanelInputMode read_panel_input_mode() noexcept {
+    try {
+        std::array<wchar_t, 32> value{};
+        GetPrivateProfileStringW(L"overlay", L"panel_input", L"hand", value.data(),
+            static_cast<DWORD>(value.size()),
+            (current_layer_directory() / L"ofxr_bridge.ini").c_str());
+        if (_wcsicmp(value.data(), L"off") == 0) return PanelInputMode::off;
+        if (_wcsicmp(value.data(), L"exclusive") == 0) return PanelInputMode::exclusive;
+        return PanelInputMode::hand;
+    } catch (...) {
+        return PanelInputMode::hand;
+    }
+}
+
 [[nodiscard]] xrfg::StatusPanelMode read_status_panel_mode() noexcept {
     try {
         std::array<wchar_t, 32> value{};
@@ -5207,6 +5262,8 @@ XrResult layer_get_instance_proc_addr_impl(
 // set of its own now, one pose action on both grips, and adds it to each of
 // those calls (layer_suggest_interaction_profile_bindings and the two after
 // it). A runtime that will not have it costs the gesture and nothing else.
+void create_panel_input(Dispatch&, PFN_xrGetInstanceProcAddr, XrInstance, PFN_xrStringToPath,
+                        PFN_xrCreateActionSet, PFN_xrDestroyActionSet, PFN_xrCreateAction) noexcept;
 void create_panel_gesture(
     Dispatch& dispatch,
     PFN_xrGetInstanceProcAddr next,
@@ -5267,6 +5324,114 @@ void create_panel_gesture(
             xrfg::BridgeFlightOperation::status_panel, 1,
             gesture.action_set != XR_NULL_HANDLE ? 1 : 0,
             static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
+        if (gesture.action_set != XR_NULL_HANDLE) {
+            create_panel_input(dispatch, next, instance, string_to_path, create_action_set,
+                               destroy_action_set, create_action);
+        }
+    } catch (...) {
+    }
+}
+
+// The panel's controls: a stick and a trigger a hand, in a set of their own
+// (see Dispatch::PanelGesture). Best effort after the grip set: nothing here
+// touches it.
+void create_panel_input(
+    Dispatch& dispatch,
+    PFN_xrGetInstanceProcAddr next,
+    XrInstance instance,
+    PFN_xrStringToPath string_to_path,
+    PFN_xrCreateActionSet create_action_set,
+    PFN_xrDestroyActionSet destroy_action_set,
+    PFN_xrCreateAction create_action) noexcept {
+    try {
+        const PanelInputMode mode = read_panel_input_mode();
+        if (mode == PanelInputMode::off) return;
+        auto& gesture = dispatch.panel_gesture;
+        if (!load_function(next, instance, "xrGetActionStateVector2f", gesture.get_vector2f) ||
+            !load_function(next, instance, "xrGetActionStateBoolean", gesture.get_boolean)) {
+            return;
+        }
+        // Profile, the stick (or pad) and the trigger each hand binds.
+        struct Known {
+            const char* profile;
+            const char* stick;
+            const char* trigger;
+        };
+        constexpr std::array<Known, 10> kKnown{{
+            {"/interaction_profiles/oculus/touch_controller", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/meta/touch_controller_plus", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/facebook/touch_controller_pro", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/valve/index_controller", "thumbstick", "trigger/click"},
+            {"/interaction_profiles/htc/vive_controller", "trackpad", "trigger/click"},
+            {"/interaction_profiles/htc/vive_focus3_controller", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/microsoft/motion_controller", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/hp/mixed_reality_controller", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/bytedance/pico4_controller", "thumbstick", "trigger/value"},
+            {"/interaction_profiles/bytedance/pico_neo3_controller", "thumbstick", "trigger/value"},
+        }};
+        constexpr std::array<const char*, 2> kHands{"/user/hand/left", "/user/hand/right"};
+        const auto bindings_for = [&](const char* stick, const char* trigger,
+                                      Dispatch::PanelGesture::ProfileBindings& out) {
+            for (std::size_t hand = 0; hand < kHands.size(); ++hand) {
+                const std::string navigate = std::string(kHands[hand]) + "/input/" + stick;
+                const std::string confirm = std::string(kHands[hand]) + "/input/" + trigger;
+                if (XR_FAILED(string_to_path(instance, navigate.c_str(), &out.navigate[hand])) ||
+                    XR_FAILED(string_to_path(instance, confirm.c_str(), &out.confirm[hand]))) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        std::vector<Dispatch::PanelGesture::ProfileBindings> profiles;
+        for (const Known& known : kKnown) {
+            Dispatch::PanelGesture::ProfileBindings entry{};
+            if (XR_FAILED(string_to_path(instance, known.profile, &entry.profile)) ||
+                !bindings_for(known.stick, known.trigger, entry)) {
+                return;
+            }
+            profiles.push_back(entry);
+        }
+        Dispatch::PanelGesture::ProfileBindings guess{};
+        if (!bindings_for("thumbstick", "trigger/value", guess)) return;
+        XrActionSetCreateInfo set_info{XR_TYPE_ACTION_SET_CREATE_INFO};
+        strcpy_s(set_info.actionSetName, "ofxr_panel_input");
+        strcpy_s(set_info.localizedActionSetName, "OFXR Bridge panel input");
+        set_info.priority = 1000;
+        XrActionSet input_set = XR_NULL_HANDLE;
+        XrResult result = create_action_set(instance, &set_info, &input_set);
+        if (XR_FAILED(result)) {
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::status_panel, 7, 0,
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
+            return;
+        }
+        XrAction navigate = XR_NULL_HANDLE, confirm = XR_NULL_HANDLE;
+        XrActionCreateInfo action_info{XR_TYPE_ACTION_CREATE_INFO};
+        action_info.countSubactionPaths = static_cast<std::uint32_t>(gesture.hands.size());
+        action_info.subactionPaths = gesture.hands.data();
+        strcpy_s(action_info.actionName, "navigate");
+        strcpy_s(action_info.localizedActionName, "Move through the OFXR Bridge status panel");
+        action_info.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+        result = create_action(input_set, &action_info, &navigate);
+        if (XR_SUCCEEDED(result)) {
+            strcpy_s(action_info.actionName, "confirm");
+            strcpy_s(action_info.localizedActionName, "Apply a change on the OFXR Bridge status panel");
+            action_info.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+            result = create_action(input_set, &action_info, &confirm);
+        }
+        if (XR_FAILED(result)) {
+            destroy_action_set(input_set);
+            xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::status_panel, 7, 0,
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
+            return;
+        }
+        gesture.input_set = input_set;
+        gesture.navigate_action = navigate;
+        gesture.confirm_action = confirm;
+        gesture.profiles = std::move(profiles);
+        gesture.guess = guess;
+        gesture.exclusive = mode == PanelInputMode::exclusive;
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::status_panel, 7, 1,
+            static_cast<std::uint64_t>(gesture.profiles.size()), gesture.exclusive ? 1 : 0);
     } catch (...) {
     }
 }
@@ -13466,6 +13631,128 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
 [[nodiscard]] xrfg::StatusPanelInput status_panel_input(
     const std::shared_ptr<SessionState>& state,
     bool use_continuous_presenter,
+    std::chrono::steady_clock::time_point now);
+
+// A change made on the status panel: the running session takes it where it
+// can, the ini keeps it for the next game start, and the tray reads it back
+// from the ini. Flight record status_panel 6: a the setting, b the choice,
+// c 0 taken live, 1 kept for the next start, -1 refused.
+void apply_panel_change(const std::shared_ptr<SessionState>& state, const xrfg::PanelChange& change) noexcept {
+    try {
+        using xrfg::PanelSetting;
+        namespace embedded = xrfg::embedded;
+        auto settings = embedded::snapshot().desired;
+        bool ok = true;
+        std::int64_t mode = 0;
+        switch (change.setting) {
+        case PanelSetting::frames:
+            ok = embedded::set_runtime_key(L"triple_frame_gen", change.choice ? L"1" : L"0");
+            // apply_live_frame_multiplier reads the key at its next poll.
+            state->triple_poll_at = {};
+            if (!state->triple_switchable) mode = 1;
+            break;
+        case PanelSetting::method:
+            settings.frame_generation = change.choice ? 1 : 0;
+            ok = embedded::request(settings);
+            break;
+        case PanelSetting::native_scale:
+            settings.native_scale = change.choice == 0 ? 50 : change.choice == 1 ? 67 : 100;
+            ok = embedded::request(settings);
+            break;
+        case PanelSetting::native_camera:
+            ok = embedded::set_runtime_key(L"dlssg_camera", change.choice ? L"1" : L"0");
+            mode = 1;
+            break;
+        case PanelSetting::flow:
+            settings.backend = change.choice == 0 ? 0 : 1;
+            if (change.choice > 0) settings.preset = change.choice - 1;
+            ok = embedded::request(settings);
+            break;
+        case PanelSetting::flow_scale:
+            settings.scale = change.choice;
+            ok = embedded::request(settings);
+            break;
+        case PanelSetting::both_ways:
+            settings.backward = change.choice != 0;
+            ok = embedded::request(settings);
+            break;
+        case PanelSetting::ofxr_mode: {
+            const bool was_extrapolating = state->extrapolate;
+            ok = embedded::set_runtime_key(L"dlss_flow_hybrid", change.choice == 1 ? L"1" : L"0") &&
+                 embedded::set_runtime_key(L"extrapolate", change.choice == 2 ? L"1" : L"0");
+            // The hybrid is re-read at a control change; extrapolation shapes
+            // the session.
+            embedded::bump_revision();
+            if (was_extrapolating || change.choice == 2) mode = 1;
+            break;
+        }
+        case PanelSetting::pipeline:
+            ok = embedded::set_runtime_key(L"deep_pipeline", change.choice == 0 ? L"1" : L"0");
+            mode = 1;
+            break;
+        case PanelSetting::pause:
+            ok = state->manual_control.set_pause(change.choice != 0);
+            break;
+        default:
+            ok = false;
+            break;
+        }
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::status_panel, 6,
+            static_cast<std::uint64_t>(change.setting), static_cast<std::uint64_t>(change.choice),
+            static_cast<std::uint64_t>(ok ? mode : -1));
+    } catch (...) {
+    }
+}
+
+// The panel's controls, on the application's end-frame thread: the hand the
+// panel sits on goes to the sync thread, the inputs it read come back, and
+// a command moves the cursor or applies a change. The cursor goes with the
+// panel that showed it.
+void update_panel_cursor(
+    const std::shared_ptr<SessionState>& state,
+    bool use_continuous_presenter,
+    std::chrono::steady_clock::time_point now) noexcept {
+    try {
+        if (state->dispatch->panel_gesture.input_set == XR_NULL_HANDLE) return;
+        auto& overlay = *state->fps_overlay;
+        const int hand = overlay.interactive_hand();
+        state->panel_input_hand.store(hand, std::memory_order_relaxed);
+        const auto generation = overlay.panel_visibility_generation();
+        if (generation != state->panel_visibility_generation) {
+            state->panel_visibility_generation = generation;
+            state->panel_cursor = {};
+            state->panel_navigator.reset();
+        }
+        if (hand < 0) return;
+        xrfg::PanelInputSample sample;
+        {
+            std::scoped_lock lock(state->panel_input_mutex);
+            sample = state->panel_input_sample;
+        }
+        const auto now_ns = static_cast<std::int64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+        const auto command = state->panel_navigator.feed(sample, now_ns);
+        xrfg::panel_cursor_expire(state->panel_cursor, now_ns);
+        if (command == xrfg::PanelCommand::none) return;
+        if (state->panel_editables.empty()) {
+            state->panel_editables =
+                xrfg::panel_editables(status_panel_input(state, use_continuous_presenter, now));
+        }
+        const auto change =
+            xrfg::panel_cursor_apply(state->panel_cursor, state->panel_editables, command, now_ns);
+        if (change) {
+            apply_panel_change(state, *change);
+            // The editables are stale now; the repaint rebuilds them.
+            state->panel_editables.clear();
+        }
+        overlay.request_panel_repaint();
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] xrfg::StatusPanelInput status_panel_input(
+    const std::shared_ptr<SessionState>& state,
+    bool use_continuous_presenter,
     std::chrono::steady_clock::time_point now) {
     namespace layer = xrfg::implicit_layer;
     xrfg::StatusPanelInput input;
@@ -13640,6 +13927,7 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
         break;
     }
     input.runtime = state->dispatch->runtime_name;
+    input.controls_bound = state->panel_input_attached.load(std::memory_order_acquire);
     return input;
 }
 
@@ -13777,17 +14065,23 @@ XrResult layer_end_frame_impl(
         if (state->fps_overlay) state->fps_overlay->suspend();
     }
     if (state->fps_overlay && !manually_disarmed) {
+        // The panel's controls, every frame while it is up on a hand.
+        update_panel_cursor(state, use_continuous_presenter, application_end_now);
         // The status panel's input only when it is up and due a repaint.
         std::optional<xrfg::StatusPanelInput> status;
         if (state->fps_overlay->status_wanted()) {
             status = status_panel_input(state, use_continuous_presenter, application_end_now);
+            state->panel_editables = xrfg::panel_editables(*status);
+            if (state->panel_cursor.row >= static_cast<int>(state->panel_editables.size())) {
+                state->panel_cursor = {};
+            }
         }
         std::scoped_lock gpu_lock(state->gpu_mutex);
         if (status) {
             status->gpu_ms = panel_gpu_milliseconds(*state, application_end_now);
         }
         state->fps_overlay->set_paused(state->pause_applied);
-        state->fps_overlay->application_frame(end_info, status ? &*status : nullptr);
+        state->fps_overlay->application_frame(end_info, status ? &*status : nullptr, &state->panel_cursor);
     }
 
     const auto submit_borrowed_to_presenter = [&]() -> XrResult {
@@ -15239,16 +15533,37 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_suggest_interaction_profile_bindings(
             suggested_bindings->suggestedBindings + suggested_bindings->countSuggestedBindings);
         bindings.push_back({gesture.grip_action, gesture.grips[0]});
         bindings.push_back({gesture.grip_action, gesture.grips[1]});
+        const std::size_t with_grips = bindings.size();
+        // The controls too, where the layer has them: the profile's own
+        // paths, or a guess for one it does not know. Tiered: a profile
+        // that refuses the controls keeps the grips, one that refuses the
+        // grips keeps the game's call as it was. a is the tier reached.
+        if (gesture.input_set != XR_NULL_HANDLE) {
+            const Dispatch::PanelGesture::ProfileBindings* profile = &gesture.guess;
+            for (const auto& known : gesture.profiles) {
+                if (known.profile == suggested_bindings->interactionProfile) profile = &known;
+            }
+            for (std::size_t hand = 0; hand < 2; ++hand) {
+                bindings.push_back({gesture.navigate_action, profile->navigate[hand]});
+                bindings.push_back({gesture.confirm_action, profile->confirm[hand]});
+            }
+        }
         XrInteractionProfileSuggestedBinding merged = *suggested_bindings;
         merged.suggestedBindings = bindings.data();
         merged.countSuggestedBindings = static_cast<std::uint32_t>(bindings.size());
         XrResult result = gesture.suggest_bindings(instance, &merged);
-        const bool added = XR_SUCCEEDED(result);
-        if (!added) {
+        std::uint64_t tier = bindings.size() > with_grips ? 2 : 1;
+        if (XR_FAILED(result) && bindings.size() > with_grips) {
+            merged.countSuggestedBindings = static_cast<std::uint32_t>(with_grips);
+            result = gesture.suggest_bindings(instance, &merged);
+            tier = 1;
+        }
+        if (XR_FAILED(result)) {
             result = gesture.suggest_bindings(instance, suggested_bindings);
+            tier = 0;
         }
         xrfg::bridge_flight_logger().event(
-            xrfg::BridgeFlightOperation::status_panel, 2, added ? 1 : 0,
+            xrfg::BridgeFlightOperation::status_panel, 2, tier,
             static_cast<std::uint64_t>(suggested_bindings->interactionProfile),
             static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
         return result;
@@ -15276,10 +15591,18 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_attach_session_action_sets(
         std::vector<XrActionSet> action_sets(
             attach_info->actionSets, attach_info->actionSets + attach_info->countActionSets);
         action_sets.push_back(gesture.action_set);
+        bool with_input = gesture.input_set != XR_NULL_HANDLE;
+        if (with_input) action_sets.push_back(gesture.input_set);
         XrSessionActionSetsAttachInfo merged = *attach_info;
         merged.actionSets = action_sets.data();
         merged.countActionSets = static_cast<std::uint32_t>(action_sets.size());
         XrResult result = gesture.attach_action_sets(session, &merged);
+        if (XR_FAILED(result) && with_input) {
+            // Without the controls, then.
+            with_input = false;
+            merged.countActionSets = static_cast<std::uint32_t>(action_sets.size() - 1);
+            result = gesture.attach_action_sets(session, &merged);
+        }
         if (XR_FAILED(result)) {
             result = gesture.attach_action_sets(session, attach_info);
             xrfg::bridge_flight_logger().event(
@@ -15287,6 +15610,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_attach_session_action_sets(
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
             return result;
         }
+        state->panel_input_attached.store(with_input, std::memory_order_release);
         std::array<XrSpace, 2> grips{XR_NULL_HANDLE, XR_NULL_HANDLE};
         std::uint64_t made = 0;
         for (std::size_t hand = 0; hand < grips.size(); ++hand) {
@@ -15306,7 +15630,8 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_attach_session_action_sets(
             state->fps_overlay->set_grip_spaces(grips[0], grips[1]);
         }
         xrfg::bridge_flight_logger().event(
-            xrfg::BridgeFlightOperation::status_panel, 3, 1, made);
+            xrfg::BridgeFlightOperation::status_panel, 3, 1, made,
+            state->panel_input_attached.load(std::memory_order_acquire) ? 1 : 0);
         return result;
     });
 }
@@ -15329,14 +15654,62 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_sync_actions(
             (sync_info->countActiveActionSets != 0 && sync_info->activeActionSets == nullptr)) {
             return gesture.sync_actions(session, sync_info);
         }
-        std::vector<XrActiveActionSet> active(
-            sync_info->activeActionSets,
-            sync_info->activeActionSets + sync_info->countActiveActionSets);
+        // The panel's controls go in with the hand the panel sits on, and
+        // only then; in the exclusive mode the game's sets stay out while
+        // the panel is up.
+        const int hand = state->panel_input_attached.load(std::memory_order_acquire)
+            ? state->panel_input_hand.load(std::memory_order_relaxed) : -1;
+        const bool controls = hand >= 0 && hand < 2 && gesture.input_set != XR_NULL_HANDLE;
+        std::vector<XrActiveActionSet> active;
+        if (!(controls && gesture.exclusive)) {
+            active.assign(sync_info->activeActionSets,
+                          sync_info->activeActionSets + sync_info->countActiveActionSets);
+        }
         active.push_back({gesture.action_set, XR_NULL_PATH});
+        if (controls) active.push_back({gesture.input_set, gesture.hands[static_cast<std::size_t>(hand)]});
         XrActionsSyncInfo merged = *sync_info;
         merged.activeActionSets = active.data();
         merged.countActiveActionSets = static_cast<std::uint32_t>(active.size());
-        const XrResult result = gesture.sync_actions(session, &merged);
+        XrResult result = gesture.sync_actions(session, &merged);
+        bool sampled = false;
+        if (XR_SUCCEEDED(result) && controls) {
+            // Read here, where changedSinceLastSync is exact.
+            xrfg::PanelInputSample sample{};
+            XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+            info.subactionPath = gesture.hands[static_cast<std::size_t>(hand)];
+            info.action = gesture.navigate_action;
+            XrActionStateVector2f stick{XR_TYPE_ACTION_STATE_VECTOR2F};
+            info.action = gesture.navigate_action;
+            const bool have_stick = gesture.get_vector2f &&
+                XR_SUCCEEDED(gesture.get_vector2f(session, &info, &stick)) && stick.isActive;
+            XrActionStateBoolean trigger{XR_TYPE_ACTION_STATE_BOOLEAN};
+            info.action = gesture.confirm_action;
+            const bool have_trigger = gesture.get_boolean &&
+                XR_SUCCEEDED(gesture.get_boolean(session, &info, &trigger)) && trigger.isActive;
+            sample.active = have_stick || have_trigger;
+            if (have_stick) {
+                sample.x = stick.currentState.x;
+                sample.y = stick.currentState.y;
+            }
+            sample.confirm = have_trigger && trigger.currentState == XR_TRUE;
+            std::scoped_lock lock(state->panel_input_mutex);
+            state->panel_input_sample = sample;
+            sampled = true;
+        } else if (XR_FAILED(result) && controls) {
+            active.pop_back();
+            if (gesture.exclusive) {
+                active.assign(sync_info->activeActionSets,
+                              sync_info->activeActionSets + sync_info->countActiveActionSets);
+                active.push_back({gesture.action_set, XR_NULL_PATH});
+            }
+            merged.activeActionSets = active.data();
+            merged.countActiveActionSets = static_cast<std::uint32_t>(active.size());
+            result = gesture.sync_actions(session, &merged);
+        }
+        if (!sampled) {
+            std::scoped_lock lock(state->panel_input_mutex);
+            state->panel_input_sample = {};
+        }
         return XR_FAILED(result) ? gesture.sync_actions(session, sync_info) : result;
     });
 }

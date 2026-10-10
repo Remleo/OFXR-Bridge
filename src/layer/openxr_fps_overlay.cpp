@@ -142,6 +142,8 @@ struct OpenXrFpsOverlay::Impl {
     bool local_attempted{};
     FlipGesture gesture;
     bool panel_logged_visible{};
+    std::atomic<int> interactive_hand{-1};
+    std::atomic<std::uint64_t> visibility_generation{};
 
     ~Impl() {
         // Only teardown waits for this overlay's last upload. No global queue
@@ -459,9 +461,11 @@ struct OpenXrFpsOverlay::Impl {
         StatusPanelInput input;
         std::uint32_t width{}, height{};
         bool bgra{}, linear{};
+        std::optional<PanelCursor> cursor;
     };
 
-    std::optional<PanelPaint> prepare_panel(const StatusPanelInput& status, std::int64_t now) {
+    std::optional<PanelPaint> prepare_panel(const StatusPanelInput& status, std::int64_t now,
+                                            const PanelCursor* cursor) {
         if (!panel_due(now)) return std::nullopt;
         next_panel_refresh = now + 250'000'000;
         if (!create_surface(panel, kStatusPanelWidth, kStatusPanelHeight, {
@@ -472,7 +476,8 @@ struct OpenXrFpsOverlay::Impl {
             panel.failed = true;
             return std::nullopt;
         }
-        PanelPaint paint{status, panel.width, panel.height, panel.bgra(), !panel.srgb()};
+        PanelPaint paint{status, panel.width, panel.height, panel.bgra(), !panel.srgb(), std::nullopt};
+        if (cursor) paint.cursor = *cursor;
         const auto snapshot = counter.snapshot(now);
         auto& rates = paint.input.rates;
         float delivered = -1.0F;
@@ -537,9 +542,11 @@ struct OpenXrFpsOverlay::Impl {
                 bridge_flight_logger().event(BridgeFlightOperation::status_panel, shown ? 4 : 5,
                     static_cast<std::uint64_t>(shown ? gesture.hand() + 1 : 0));
                 if (shown) next_panel_refresh = 0;
+                visibility_generation.fetch_add(1, std::memory_order_relaxed);
             }
             publish_panel_due();
             const int hand = gesture.hand();
+            interactive_hand.store(shown ? hand : -1, std::memory_order_relaxed);
             // Its pose is the controller's now, not where it was turned over:
             // through the hide delay too, which is what lets it follow the
             // hand down as it comes back up.
@@ -572,7 +579,8 @@ struct OpenXrFpsOverlay::Impl {
         if (XR_FAILED(create_space(session, &info, &local))) local = XR_NULL_HANDLE;
     }
 
-    std::optional<PanelPaint> application_frame(const XrFrameEndInfo* info, const StatusPanelInput* status) {
+    std::optional<PanelPaint> application_frame(const XrFrameEndInfo* info, const StatusPanelInput* status,
+                                                const PanelCursor* cursor) {
         const auto now = now_ns();
         if (!info || info->type != XR_TYPE_FRAME_END_INFO) return std::nullopt;
         if (now >= next_refresh) {
@@ -589,7 +597,7 @@ struct OpenXrFpsOverlay::Impl {
         std::optional<PanelPaint> paint;
         if (!disabled) {
             prepare_gesture();
-            if (status) paint = prepare_panel(*status, now);
+            if (status) paint = prepare_panel(*status, now, cursor);
         }
         publish_panel_due();
         return paint;
@@ -610,17 +618,18 @@ OpenXrFpsOverlay::OpenXrFpsOverlay(XrInstance instance, XrSession session, XrSys
 OpenXrFpsOverlay::~OpenXrFpsOverlay() = default;
 
 void OpenXrFpsOverlay::application_frame(
-    const XrFrameEndInfo* info, const StatusPanelInput* status) noexcept {
+    const XrFrameEndInfo* info, const StatusPanelInput* status, const PanelCursor* cursor) noexcept {
     try {
         std::optional<Impl::PanelPaint> paint;
         {
             std::scoped_lock lock(impl_->mutex);
-            paint = impl_->application_frame(info, status);
+            paint = impl_->application_frame(info, status, cursor);
         }
         if (!paint) return;
         std::uint32_t rows = 0;
         const auto pixels = rasterize_status_panel(
-            paint->width, paint->height, paint->input, paint->bgra, paint->linear, &rows);
+            paint->width, paint->height, paint->input, paint->bgra, paint->linear, &rows,
+            paint->cursor ? &*paint->cursor : nullptr);
         std::scoped_lock lock(impl_->mutex);
         impl_->upload_panel(pixels, rows);
     }
@@ -630,6 +639,20 @@ void OpenXrFpsOverlay::application_frame(
 bool OpenXrFpsOverlay::status_wanted() noexcept {
     const auto due = impl_->panel_wanted_at.load(std::memory_order_relaxed);
     return due >= 0 && now_ns() >= due;
+}
+
+int OpenXrFpsOverlay::interactive_hand() const noexcept {
+    return impl_->interactive_hand.load(std::memory_order_relaxed);
+}
+
+std::uint64_t OpenXrFpsOverlay::panel_visibility_generation() const noexcept {
+    return impl_->visibility_generation.load(std::memory_order_relaxed);
+}
+
+void OpenXrFpsOverlay::request_panel_repaint() noexcept {
+    std::scoped_lock lock(impl_->mutex);
+    impl_->next_panel_refresh = 0;
+    impl_->publish_panel_due();
 }
 
 void OpenXrFpsOverlay::set_grip_spaces(XrSpace left, XrSpace right) noexcept {
