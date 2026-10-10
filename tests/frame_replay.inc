@@ -909,6 +909,173 @@ void replay_held_out(const std::filesystem::path& directory) {
         xrfg::D3D12NativeDlssG native;
         require_hresult(native.initialize(fixture.device(), fixture.queue(), a->GetDesc(), f0.view_format),
                         "replay native initialization");
+        // XRFG_TEST_REPLAY_NATIVE_CAMERA_FIT=1 hands NGX the camera's motion
+        // between the frames in place of none: a rigid motion (rotation and
+        // translation) fitted to B's vectors and depth over a 64x64 grid by
+        // Gauss-Newton on the reprojection error, keeping the closest 70% of
+        // the points (the scene, not what moves with the camera) after the
+        // first passes. One eye per feature: run with XRFG_NATIVE_DLSSG_PER_EYE=1.
+        if (std::getenv("XRFG_TEST_REPLAY_NATIVE_CAMERA_FIT")) {
+            const auto half_to_float = [](std::uint16_t h) {
+                const int exponent = (h >> 10) & 31, mantissa = h & 1023;
+                float value = exponent == 0 ? std::ldexp(float(mantissa), -24)
+                                            : std::ldexp(float(mantissa | 1024), exponent - 25);
+                return (h & 0x8000) ? -value : value;
+            };
+            for (std::size_t e = 0; e < views2.size() && e < f2_guides.guides.size() && e < 2; ++e) {
+                const auto dir = frame_dir(b_index + guide_shift);
+                xrfg::DumpedTexture motion, depth;
+                if (f2_guides.motion_files[e] == "-" || f2_guides.depth_files[e] == "-" ||
+                    !xrfg::read_dumped_texture(dir / f2_guides.motion_files[e], &motion) ||
+                    !xrfg::read_dumped_texture(dir / f2_guides.depth_files[e], &depth) ||
+                    (motion.format != DXGI_FORMAT_R16G16_FLOAT && motion.format != DXGI_FORMAT_R32G32_FLOAT)) continue;
+                const auto& g = f2_guides.guides[e];
+                const auto& f = views2[e].fov;
+                const double l = std::tan(f.angle_left), r = std::tan(f.angle_right);
+                const double up = std::tan(f.angle_up), down = std::tan(f.angle_down);
+                const auto mv = [&](UINT x, UINT y) {
+                    const auto& s = motion.subresources[g.motion_slice];
+                    const std::uint8_t* p = s.data.data() + std::size_t(y) * s.row_bytes;
+                    if (motion.format == DXGI_FORMAT_R32G32_FLOAT) {
+                        float v[2];
+                        std::memcpy(v, p + std::size_t(x) * 8, 8);
+                        return std::array<double, 2>{v[0], v[1]};
+                    }
+                    std::uint16_t h[2];
+                    std::memcpy(h, p + std::size_t(x) * 4, 4);
+                    return std::array<double, 2>{half_to_float(h[0]), half_to_float(h[1])};
+                };
+                const auto& ds = depth.subresources[0];
+                const std::size_t depth_bytes = depth.width ? ds.row_bytes / depth.width : 4;
+                const auto depth_at = [&](UINT x, UINT y) {
+                    float d;
+                    std::memcpy(&d, ds.data.data() + std::size_t(y) * ds.row_bytes + std::size_t(x) * depth_bytes, 4);
+                    return double(d);
+                };
+                struct Point { std::array<double, 3> b; double ua, va; };
+                std::vector<Point> points;
+                constexpr UINT kGrid = 64;
+                for (UINT j = 0; j < kGrid; ++j)
+                    for (UINT i = 0; i < kGrid; ++i) {
+                        const double u = (i + 0.5) / kGrid, v = (j + 0.5) / kGrid;
+                        const auto m = mv(g.motion_x + UINT(u * g.motion_width), g.motion_y + UINT(v * g.motion_height));
+                        const double d = depth_at(g.depth_x + UINT(u * g.depth_width), g.depth_y + UINT(v * g.depth_height));
+                        const double du = m[0] * g.scale_x * vector_scale / g.motion_width;
+                        const double dv = m[1] * g.scale_y * vector_scale / g.motion_height;
+                        if (!std::isfinite(du) || !std::isfinite(dv) || !std::isfinite(d) || std::abs(du) > 1 || std::abs(dv) > 1) continue;
+                        // Reversed infinite depth: distance is near / depth; the sky lies far off.
+                        const double z = g.depth_inverted ? (d > 1e-7 ? g.camera_near / d : 1e7)
+                                                          : (d < 1 - 1e-7 ? g.camera_near / (1 - d) : 1e7);
+                        const double xt = l + u * (r - l), yt = up - v * (up - down);
+                        points.push_back({{xt * z, yt * z, -z}, u + du, v + dv});
+                    }
+                if (points.size() < 64) continue;
+                // x: axis-angle rotation then translation, taking B's camera space to A's.
+                const auto rotation = [](const double* w) {
+                    const double a = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+                    std::array<double, 9> m{1, 0, 0, 0, 1, 0, 0, 0, 1};
+                    if (a < 1e-12) return m;
+                    const double x = w[0] / a, y = w[1] / a, z = w[2] / a, c = std::cos(a), s = std::sin(a), t = 1 - c;
+                    return std::array<double, 9>{t * x * x + c, t * x * y - s * z, t * x * z + s * y,
+                                                 t * x * y + s * z, t * y * y + c, t * y * z - s * x,
+                                                 t * x * z - s * y, t * y * z + s * x, t * z * z + c};
+                };
+                const auto residual = [&](const double* x, const Point& p, double* out) {
+                    const auto R = rotation(x);
+                    const double ax = R[0] * p.b[0] + R[1] * p.b[1] + R[2] * p.b[2] + x[3];
+                    const double ay = R[3] * p.b[0] + R[4] * p.b[1] + R[5] * p.b[2] + x[4];
+                    const double az = R[6] * p.b[0] + R[7] * p.b[1] + R[8] * p.b[2] + x[5];
+                    const double w = -az > 1e-6 ? -az : 1e-6;
+                    out[0] = ((ax / w - l) / (r - l) - p.ua) * g.motion_width;
+                    out[1] = ((up - ay / w) / (up - down) - p.va) * g.motion_height;
+                };
+                double x[6]{};
+                std::vector<std::uint8_t> use(points.size(), 1);
+                for (int pass = 0; pass < 12; ++pass) {
+                    double h[6][6]{}, b[6]{};
+                    const double step[6]{1e-6, 1e-6, 1e-6, 1e-3, 1e-3, 1e-3};
+                    std::vector<double> norms(points.size());
+                    for (std::size_t k = 0; k < points.size(); ++k) {
+                        double r0[2];
+                        residual(x, points[k], r0);
+                        norms[k] = std::hypot(r0[0], r0[1]);
+                        if (!use[k]) continue;
+                        double jac[2][6];
+                        for (int c = 0; c < 6; ++c) {
+                            double xs[6];
+                            std::copy(x, x + 6, xs);
+                            xs[c] += step[c];
+                            double r1[2];
+                            residual(xs, points[k], r1);
+                            jac[0][c] = (r1[0] - r0[0]) / step[c];
+                            jac[1][c] = (r1[1] - r0[1]) / step[c];
+                        }
+                        for (int a = 0; a < 6; ++a) {
+                            b[a] -= jac[0][a] * r0[0] + jac[1][a] * r0[1];
+                            for (int c = 0; c < 6; ++c) h[a][c] += jac[0][a] * jac[0][c] + jac[1][a] * jac[1][c];
+                        }
+                    }
+                    // Solve h dx = b by Gaussian elimination with partial pivoting.
+                    double dx[6]{};
+                    bool solved = true;
+                    for (int c = 0; c < 6 && solved; ++c) {
+                        int pivot = c;
+                        for (int k = c + 1; k < 6; ++k) if (std::abs(h[k][c]) > std::abs(h[pivot][c])) pivot = k;
+                        if (std::abs(h[pivot][c]) < 1e-18) { solved = false; break; }
+                        std::swap(h[c], h[pivot]); std::swap(b[c], b[pivot]);
+                        for (int k = c + 1; k < 6; ++k) {
+                            const double factor = h[k][c] / h[c][c];
+                            for (int m = c; m < 6; ++m) h[k][m] -= factor * h[c][m];
+                            b[k] -= factor * b[c];
+                        }
+                    }
+                    if (!solved) break;
+                    for (int c = 5; c >= 0; --c) {
+                        double sum = b[c];
+                        for (int m = c + 1; m < 6; ++m) sum -= h[c][m] * dx[m];
+                        dx[c] = sum / h[c][c];
+                    }
+                    for (int c = 0; c < 6; ++c) x[c] += dx[c];
+                    if (pass >= 2) {
+                        std::vector<double> sorted(norms);
+                        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() * 7 / 10, sorted.end());
+                        const double cut = sorted[sorted.size() * 7 / 10];
+                        for (std::size_t k = 0; k < points.size(); ++k) use[k] = norms[k] <= cut;
+                    }
+                }
+                std::vector<double> inlier;
+                for (std::size_t k = 0; k < points.size(); ++k) {
+                    if (!use[k]) continue;
+                    double rr[2];
+                    residual(x, points[k], rr);
+                    inlier.push_back(std::hypot(rr[0], rr[1]));
+                }
+                std::nth_element(inlier.begin(), inlier.begin() + inlier.size() / 2, inlier.end());
+                const auto R = rotation(x);
+                // Row vectors: B's view point times M is A's, M = [R^T 0; t 1].
+                const DirectX::XMMATRIX motion_m(float(R[0]), float(R[3]), float(R[6]), 0.0F,
+                                                 float(R[1]), float(R[4]), float(R[7]), 0.0F,
+                                                 float(R[2]), float(R[5]), float(R[8]), 0.0F,
+                                                 float(x[3]), float(x[4]), float(x[5]), 1.0F);
+                const float n = g.camera_near, far_plane = g.camera_far;
+                const float pz = g.depth_infinite ? (g.depth_inverted ? 0.f : -1.f)
+                                 : g.depth_inverted ? n / (far_plane - n) : far_plane / (n - far_plane);
+                const float pw = g.depth_infinite ? (g.depth_inverted ? n : -n)
+                                 : g.depth_inverted ? n * far_plane / (far_plane - n) : n * far_plane / (n - far_plane);
+                const DirectX::XMMATRIX projection(float(2 / (r - l)), 0, 0, 0, 0, float(2 / (up - down)), 0, 0,
+                                                   float((r + l) / (r - l)), float((up + down) / (up - down)), pz, -1,
+                                                   0, 0, pw, 0);
+                const DirectX::XMMATRIX clip_to_previous =
+                    DirectX::XMMatrixInverse(nullptr, projection) * motion_m * projection;
+                DirectX::XMFLOAT4X4 stored;
+                DirectX::XMStoreFloat4x4(&stored, clip_to_previous);
+                native.set_test_camera_motion(UINT(e), &stored.m[0][0]);
+                const double angle = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]) * 57.29578;
+                std::cout << "replay native camera fit eye " << e << ": " << angle << " degrees, translation "
+                          << x[3] << ' ' << x[4] << ' ' << x[5] << ", median inlier residual "
+                          << inlier[inlier.size() / 2] << " px over " << points.size() << " points\n";
+            }
+        }
         auto seed_a = make_guides(f0, 1, 1.0F, nullptr);
         auto seed_b = make_guides(f0, 2, 1.0F, nullptr);
         auto moved = make_guides(f2_guides, 3, vector_scale, &f0);

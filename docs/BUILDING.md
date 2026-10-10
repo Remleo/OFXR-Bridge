@@ -1140,6 +1140,54 @@ degrees a pair) native erred 9.31 against 9.68 at 100% and 10.18 against
 CPU for the compose and the reseed decision, a frame later; for 4% it is not
 built.
 
+On the Steam Frame the character itself ghosted as the camera turned about
+her (Native Stereo, 3474x3474 an eye, about 37 game frames a second). The
+vectors were right - within 1.7 pixels of measured image flow, near zero on
+her and 35-54 pixels a frame on the scene behind - and NGX placed both at
+half, but in its frames her suit was smeared sideways and half see-through
+along the side the background slid past. NGX's object separation did it: at
+NVIDIA's 40 (linearised depth, near-plane units: her 21 against the scene's
+79-320) NGX cut her from the background, and told the camera was still - the
+engine's camera is not known here, only the head's - it carried the
+background's motion across her. At 1000 it separates nothing in view and the
+smear is gone. On six triplets of that turn native at 67% erred 9.43 against
+13.78 at 40 (400: 12.36; 2000 and 4000 as 1000; blending 15.00), and on the
+42 Galactic Racer triplets 8.08 against 7.96, better on 13. 1000 is now the
+default (`XRFG_TEST_NATIVE_DLSSG_SEPARATION` overrides it).
+
+Handing NGX the camera's motion was tried instead, since its clip-to-previous
+matrices are identity here while the vectors carry the game camera's orbit.
+`XRFG_TEST_REPLAY_NATIVE_CAMERA_FIT=1` fits a rigid motion (rotation and
+translation) to B's vectors and depth - Gauss-Newton on the reprojection
+error over a 64x64 grid, keeping the closest 70% of the points after the
+first passes - and hands it to NGX per eye
+(`D3D12NativeDlssG::set_test_camera_motion`, with
+`XRFG_NATIVE_DLSSG_PER_EYE=1`). On the four Steam Frame triplets it fitted
+2.4-2.7 degrees a pair to a median 0.6 pixels, and NGX's frames did not
+change: 13.33 with it and without at separation 40, 8.19 against 8.20 at
+1000. NGX takes the motion from the vectors; the separation decides how it
+treats her edge. Feature per eye or both eyes in one measured alike too.
+
+Scored on the character alone (her pixels within 3 m, inside her box, and
+a band about her outline) on simulator triplets turning twice as fast (her
+52 pixels a frame, the scene 70-100), at 67%: separation 40 erred 13.0
+inside her and 12.4 on her outline, 1000 11.8 and 11.1; at 100%, 10.7 and
+10.0.
+
+In Stellar Blade the detail restore of a reduced feature costs more than
+it gives. On the four Steam Frame triplets at separation 1000: 67% with the
+restore 8.22, with falloff 4 / 8 / 16 8.06 / 7.86 / 7.65, without it 7.38,
+and 100% 6.93; on the fast simulator ones 8.95, 8.64 / 8.50 / 8.39, 8.27 and
+8.44. Restoring only where the motion field does not break (a second
+difference over 16 pixels under a pixel) measured 8.13 and 8.68, so it is
+not kept. The game's own DLSS-G (310.1.0, which UEVR's injection leaves NGX
+loading from its Streamline folder) measured the same as 310.9.1 on all of
+these to the hundredth. 67% stays the default, which Galactic Racer's
+triplets favour; for Stellar Blade choose 100% in the tray, which cost no
+frame rate on the simulator (45 a second either way at 3004x3004 an eye).
+NGX's near/far partition of 50 or 150 moved separation 40 to 12.41 or 13.20
+and changed nothing at 1000; a seam of 128 changed nothing.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:

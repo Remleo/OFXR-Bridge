@@ -50,6 +50,11 @@ class D3D12NativeDlssG final {
     [[nodiscard]] Skip last_skip() const noexcept;
     // Eye evaluations that reseeded NGX's history with the aligned previous frame.
     [[nodiscard]] std::uint64_t reseeds() const noexcept;
+    // Tests: an eye's camera motion between the two frames, handed to NGX in
+    // place of none - the clip-space transform taking B's camera to A's, as
+    // sixteen floats in DirectXMath's row-vector, row-major order. nullptr
+    // clears it. Applies to a feature's first eye, so one eye per feature.
+    void set_test_camera_motion(UINT eye, const float *clip_to_previous) noexcept;
 
   private:
     struct Impl;

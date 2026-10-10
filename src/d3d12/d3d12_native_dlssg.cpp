@@ -5,11 +5,13 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <share.h>
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 #include <windows.h>
@@ -479,9 +481,21 @@ struct D3D12NativeDlssG::Impl {
     // recorded Galactic Racer triplets it cut native generation's error by
     // 0.09-0.12 at 67% and 100%, better on 31 of them. Scales from 0.03 to
     // 0.2 measured alike; 10 and the other heuristics' settings were worse.
+    //
+    // The object separation is the depth gap, in those units, across which
+    // NGX treats neighbouring pixels as different objects. NVIDIA's 40 cuts a
+    // third-person character from the scene behind it, and as the game
+    // camera orbits the character NGX smears the background's motion across
+    // it: it is told the camera is still, since the engine's camera is not
+    // known here, only the head's. 1000 (and above, alike) separates nothing
+    // in view. On six Stellar Blade triplets turning about the character it
+    // cut native generation's error from 13.8 to 9.4 (blending: 15.0) and
+    // the smear is gone; on the 42 Galactic Racer ones it cost 0.12 (7.96 to
+    // 8.08). 400 measured 12.4.
     // The rest are NVIDIA's defaults. Tests may set each.
-    float depth_scale{0.1F}, near_far_partition{600.0F}, object_separation{40.0F};
+    float depth_scale{0.1F}, near_far_partition{600.0F}, object_separation{1000.0F};
     bool vectors_dilated{};
+    std::array<std::optional<XMFLOAT4X4>, 2> test_motion{};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
@@ -849,7 +863,7 @@ struct D3D12NativeDlssG::Impl {
     // the first of them; motion carries everything else.
     HRESULT evaluate(ID3D12GraphicsCommandList *list, Transitions &t, Feature &e,
                      const D3D12ReprojectionView &b, const DlssMotionVectorFrame &gb,
-                     const Params &p, UINT count, UINT index, bool reset) {
+                     const Params &p, UINT count, UINT index, bool reset, UINT eye) {
         const UINT output = index - 1;
         t.to(e.generated[output].Get(), kCommon, kWrite);
         t.to(e.disable[output].Get(), kCommon, kWrite);
@@ -869,6 +883,11 @@ struct D3D12NativeDlssG::Impl {
         matrix(o.clipToLensClip, XMMatrixIdentity());
         matrix(o.clipToPrevClip, XMMatrixIdentity());
         matrix(o.prevClipToClip, XMMatrixIdentity());
+        if (!reset && eye < test_motion.size() && test_motion[eye]) {
+            const XMMATRIX motion = XMLoadFloat4x4(&*test_motion[eye]);
+            matrix(o.clipToPrevClip, motion);
+            matrix(o.prevClipToClip, XMMatrixInverse(nullptr, motion));
+        }
         const auto c = camera(b.pose);
         XMFLOAT3 right, up, fwd;
         XMStoreFloat3(&right, XMVector3TransformNormal(XMVectorSet(1, 0, 0, 0), c));
@@ -1070,6 +1089,23 @@ std::uint64_t D3D12NativeDlssG::reseeds() const noexcept {
     return impl_ ? impl_->reseeds : 0;
 #else
     return 0;
+#endif
+}
+void D3D12NativeDlssG::set_test_camera_motion(UINT eye, const float *clip_to_previous) noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    if (!impl_ || eye >= impl_->test_motion.size()) {
+        return;
+    }
+    if (clip_to_previous) {
+        XMFLOAT4X4 m;
+        std::memcpy(&m, clip_to_previous, sizeof(m));
+        impl_->test_motion[eye] = m;
+    } else {
+        impl_->test_motion[eye].reset();
+    }
+#else
+    (void)eye;
+    (void)clip_to_previous;
 #endif
 }
 
@@ -1333,7 +1369,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 }
                 p.end_pack(t, seed);
                 if (FAILED(p.evaluate(list, t, seed, bv[first], *ag->eyes[guide_index(first)],
-                                      first_params, 1, 1, true))) {
+                                      first_params, 1, 1, true, first))) {
                     t.restore();
                     return skip(Skip::evaluate_failed);
                 }
@@ -1350,7 +1386,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             for (UINT output = 0; output < outputs.size(); ++output) {
                 if (FAILED(p.evaluate(list, t, feature, bv[first], *bg->eyes[guide_index(first)],
                                       eye_params[first], UINT(outputs.size()), output + 1,
-                                      false))) {
+                                      false, first))) {
                     t.restore();
                     return skip(Skip::evaluate_failed);
                 }
