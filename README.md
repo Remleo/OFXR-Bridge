@@ -337,6 +337,36 @@ hybrid under a new key and ignores the old one.
 
 ## Other changes in this fork
 
+- **DLSS vectors are followed into the eye's own previous image when a game
+  wrote them into the other eye's.** Reported in the Stellar Blade demo under
+  UEVR: "dlss-g is quite broken, mouse rotation has issues". Stellar Blade's
+  right eye renders wrongly in UEVR's Native Stereo, so it is played in
+  Synchronized Sequential, where one Unreal view renders both eyes in turn
+  (Alternating/AFR is the same without UEVR's ghosting fix). Unreal writes a
+  view's vectors from its previous frame, which is then the other eye's: each
+  eye's vectors held the shift of a distant point from one eye's image to the
+  other's (402 pixels at 1680x1760 on the Meta XR Simulator, measured with the
+  camera still) plus part of the motion, and every method took them as that
+  eye's own. Turning the camera, the generated frame then erred 23.7 with
+  OFXR + DLSS vectors (a plain blend of the two frames erred 24.4), 13.2 with
+  the hybrid and 11.8 with native DLSS FG at 67%.
+  Now an eye whose DLSS stream also evaluates the other eye keeps that other
+  eye's evaluation between its own two, and the synthesizer follows the
+  eye's vectors through it (`D3D12GuideComposer`): from this eye's image into
+  the other's, then on to this eye's previous image, where the two eyes'
+  projections cancel. The GPU decides each pair whether the vectors point
+  into the other eye: there the two eyes' vectors differ by what their
+  projections do (about twice that shift), and by little where each eye has a
+  view of its own, as in Lies of P with the ghosting fix, which is left
+  unchanged. Turning the camera again, OFXR + DLSS vectors erred 10.2, the
+  hybrid 9.7, native DLSS FG 9.3 (100%) and 10.0 (67%), level with NVIDIA's
+  optical flow (9.4); warping the older frame by the vectors rebuilt the newer
+  one best at a scale of 1 (12.5, against 22.9-27.0 at 0.5, 1.5 and 2). The
+  pass over the vectors runs only for such a stream. A headset whose two
+  eyes' fields of view are the same has no shift to tell the cases apart and
+  keeps the vectors as they are. Native Stereo, which gives each eye a stream
+  of its own, is unchanged and still the better mode where the game allows
+  it: Synchronized Sequential renders each eye a game frame apart.
 - **Generated frames are made, and sent, from the head's pose when they are
   shown.** Reported in Galactic Racer under UEVR on SteamVR: "laggy black
   bars when moving my head". Every generated frame was made in the newer

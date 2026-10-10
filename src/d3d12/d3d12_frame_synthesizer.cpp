@@ -1,6 +1,7 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
+#include "xrfg/d3d12_guide_composer.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/frame_dump.hpp"
 
@@ -886,6 +887,11 @@ struct D3D12FrameSynthesizer::Impl {
     D3D12_RESOURCE_DESC image_description{};
     DXGI_FORMAT view_format{DXGI_FORMAT_UNKNOWN};
     FrameDump frame_dump;
+    // Follows an eye's vectors on into its own previous image where the game
+    // wrote them into the other eye's (DlssMotionVectorFrame::bridge).
+    D3D12GuideComposer guide_composer;
+    bool guide_composer_tried{};
+    bool guide_composer_ready{};
     D3D12_RESOURCE_STATES release_state{};
     UINT descriptor_increment{};
     UINT rtv_increment{};
@@ -5259,6 +5265,19 @@ struct D3D12FrameSynthesizer::Impl {
         if (FAILED(result)) {
             cancel_next();
             return result;
+        }
+        // Every method then takes the eye's vectors to its own previous image,
+        // and so does the next pair, where this frame is A.
+        if (next.motion_vectors) {
+            if (!guide_composer_tried) {
+                guide_composer_tried = true;
+                guide_composer_ready = SUCCEEDED(guide_composer.initialize(device.Get()));
+            }
+            if (guide_composer_ready) {
+                next.motion_vectors = guide_composer.compose(slot.command_list.Get(),
+                    static_cast<UINT>(work_slot_index), next.motion_vectors,
+                    {next.views.data(), next.view_count});
+            }
         }
         bool used_game_motion = false;
         result = record_pair(

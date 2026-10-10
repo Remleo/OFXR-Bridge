@@ -1055,6 +1055,53 @@ and `xrfg_layer_projection_eyes` checks that a swapchain per eye is named its
 eye and a double-wide one none (`XRFG_TEST_SPLIT_EYE_ONE_LAYER` makes the
 call chain's split-eye run submit both views in one projection layer).
 
+#### Vectors written into the other eye's image
+
+A stream both eyes take is not always one feature over two views. Under
+UEVR's Synchronized Sequential, and Alternating/AFR without its ghosting fix,
+one Unreal view renders both eyes in turn, and Unreal writes a view's vectors
+from that view's previous frame - the other eye's. Each eye's vectors then
+lead into the other eye's image, a game frame earlier, not into its own
+previous image. In the Stellar Blade demo on the Meta XR Simulator (1680x1760
+per eye, the left eye's field of view -54 to +40 degrees, the right's its
+mirror) the median vector with the camera still was -401.8 pixels: where a
+distant point of the left eye's image sits in the right eye's, (tan -54 -
+tan -40) / (tan 40 - tan -54) x 1680 = -407. Turning the camera one way and
+the other added a part of the motion (-475 to -503, and -303 to -323). The
+replay put OFXR + DLSS vectors at 23.7 where the scene moved (a blend: 24.4),
+the hybrid at 13.2 and native DLSS FG at 11.8 (67%) and 9.5 (100%), against
+NVIDIA's optical flow at 9.1.
+
+The resolver keeps a stream's last three evaluations (`older` beside
+`previous` and `latest`), and for an eye of a stream both eyes take it hands
+that eye's frame the other eye's evaluation between its own two
+(`DlssMotionVectorFrame::bridge`). `D3D12GuideComposer`, recorded in
+`submit_pair` once the work slot is reset, gives such a frame vectors of its
+own in a texture of the slot's (`guide_composer.hlsl`). Its `Decide` pass
+reads both frames' vectors on an 8x8 grid over the central 80% and counts the
+points where the eyes' difference `vB.x - vR.x` lies nearer the difference
+their projections make for a distant point, from this eye's field of view and
+its mirror, than to zero; `Compose` then follows B's vector into the bridge's
+image and adds the bridge's vector there, `vB + vR(p + vB)`, where at least
+seven points in ten agreed, and copies B's vectors otherwise. A projection
+difference under 16 pixels - two eyes with the same field of view - cannot be
+told from motion and always copies. The composed frame takes the bridge's
+previous jitter, A's, and gives up its bridge; it replaces the frame's guides,
+so every method, the frame dump and the next pair (where the frame is A) see
+it.
+
+With the composer, the replay of Synchronized Sequential frames turning the
+camera put OFXR + DLSS vectors at 10.2, the hybrid at 9.7 and native DLSS FG
+at 9.3 (100%) and 10.0 (67%), beside NVIDIA at 9.4 and FidelityFX at 10.2.
+Warping each run's older frame by the newer one's composed vectors at scales
+0, 0.5, 1, 1.5 and 2 rebuilt the newer frame best at 1 (12.5 and 13.4,
+against 17.3-27.0). `test_guide_composer` composes vectors into the other eye
+(the projection shift plus half the motion each way) to the motion, copies
+vectors into the eye's own image unchanged, and leaves an eye without a bridge
+alone; the per-eye test checks each eye's bridge, also where both eyes were
+evaluated before either was released. `XRFG_TEST_GUIDES_ONLY=1` runs these
+tests alone.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:

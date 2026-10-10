@@ -271,6 +271,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
         src/d3d12/d3d12_native_dlssg.cpp
+        src/d3d12/d3d12_guide_composer.cpp
         src/d3d12/frame_dump.cpp
         src/common/dlss_motion_vectors.cpp
         "${XRFG_PACK_INPUT_HEADER}"
@@ -293,6 +294,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_NVIDIA_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_FAST_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_FAST_BIDIRECTIONAL_SYNTHESIZE_PIXEL_HEADER}")
+    foreach(stage decide compose)
+        set(header "${XRFG_GENERATED_SHADER_DIR}/guide_composer_${stage}_shader.hpp")
+        if(stage STREQUAL "decide")
+            set(entry Decide)
+        else()
+            set(entry Compose)
+        endif()
+        add_custom_command(OUTPUT "${header}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+            COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E ${entry}
+                /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect /Fh "${header}"
+                /Vn g_xrfg_guide_composer_${stage}_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/guide_composer.hlsl"
+            DEPENDS src/d3d12/guide_composer.hlsl VERBATIM)
+        target_sources(xrfg_d3d12_history PRIVATE "${header}")
+    endforeach()
     target_include_directories(xrfg_d3d12_history
         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
         PRIVATE

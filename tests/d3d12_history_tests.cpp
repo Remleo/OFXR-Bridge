@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include "xrfg/d3d12_guide_composer.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/frame_dump.hpp"
 #include <map>
@@ -2886,6 +2887,11 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
             shared_left->eyes[0]->previous_serial == 2 &&
             shared_right->eyes[0]->previous_serial == 3,
         "one shared DLSS stream did not give each eye the evaluation before its release");
+    // Each eye's bridge is the other eye's evaluation between its two.
+    require(shared_left->eyes[0]->bridge && shared_left->eyes[0]->bridge->serial == 3 &&
+            shared_right->eyes[0]->bridge && shared_right->eyes[0]->bridge->serial == 4 &&
+            !shared_left->eyes[0]->bridge->bridge,
+        "an eye of one shared DLSS stream did not get the other eye's evaluation as its bridge");
     // Both evaluated before either release: left first.
     publish(633, left_output.Get());
     publish(633, right_output.Get());
@@ -2896,6 +2902,10 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
         right_xr.Get(), fixture.queue(), 1, shared_both, shared_both);
     require(first && second && first->eyes[0]->serial == 6 && second->eyes[0]->serial == 7,
         "one shared DLSS stream evaluated before both releases did not go left first");
+    // The left eye's bridge is then the stream's evaluation before its newest two.
+    require(first->eyes[0]->bridge && first->eyes[0]->bridge->serial == 5 &&
+            second->eyes[0]->bridge && second->eyes[0]->bridge->serial == 6,
+        "an eye evaluated before the newest did not get the evaluation before it as its bridge");
 
     // An eye image no DLSS output has the shape of takes nothing, and says
     // why. It was reported as a temporal mismatch - on the status panel,
@@ -2934,6 +2944,118 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(633);
     xrfg::retire_dlss_motion_vector_stream(644);
     xrfg::retire_dlss_motion_vector_stream(655);
+}
+
+// A game that renders both eyes through one view (UEVR's Synchronized
+// Sequential without its ghosting fix) writes each eye's vectors into the
+// other eye's image: the shift of a distant point between the eyes'
+// projections plus half the motion. Followed through the other eye's vectors
+// they reach the eye's own previous image; vectors that already do are copied.
+void test_guide_composer(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 256;
+    constexpr UINT height = 32;
+    xrfg::D3D12GuideComposer composer;
+    require_hresult(composer.initialize(fixture.device()), "guide composer initialization");
+    xrfg::D3D12ReprojectionView view{};
+    view.fov = {-0.942477822F, 0.698131740F, 0.872664630F, -0.855211377F};
+    const float left = std::tan(view.fov.angle_left);
+    const float right = std::tan(view.fov.angle_right);
+    // Where a distant point of this (left) eye's image is in the other's, less
+    // where it is in this one: the other eye's field of view is the mirror.
+    const float shift = (left + right) / (right - left) * float(width);
+    const auto run = [&](float b_motion, float r_motion, bool bridged) {
+        auto motion = create_and_upload_game_motion(fixture, width, height, {b_motion, r_motion});
+        auto r = std::make_shared<xrfg::DlssMotionVectorFrame>();
+        r->stream = 1;
+        r->epoch = 1;
+        r->serial = 1;
+        r->motion_vectors = motion;
+        r->output_width = r->motion_width = width;
+        r->output_height = r->motion_height = height;
+        r->motion_slice = 1;
+        r->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        auto b = std::make_shared<xrfg::DlssMotionVectorFrame>(*r);
+        b->serial = 2;
+        b->motion_slice = 0;
+        if (bridged) b->bridge = r;
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = 1;
+        set->eyes[0] = b;
+        std::shared_ptr<const xrfg::DlssMotionVectorSet> composed;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            composed = composer.compose(list, 0, set, std::span(&view, 1));
+        });
+        return std::pair<std::shared_ptr<const xrfg::DlssMotionVectorSet>,
+                         std::shared_ptr<const xrfg::DlssMotionVectorSet>>{set, composed};
+    };
+    // The x of the composed texels in the central half of the middle row.
+    const auto read = [&](const xrfg::DlssMotionVectorFrame& frame) {
+        const D3D12_RESOURCE_DESC description = frame.motion_vectors->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+        UINT rows = 0;
+        UINT64 row_size = 0;
+        UINT64 total = 0;
+        fixture.device()->GetCopyableFootprints(&description, 0, 1, 0, &layout, &rows, &row_size, &total);
+        ComPtr<ID3D12Resource> readback = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK, total,
+                                                        D3D12_RESOURCE_STATE_COPY_DEST);
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            const auto to_copy = transition_barrier(frame.motion_vectors.Get(), frame.resource_state,
+                                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->ResourceBarrier(1, &to_copy);
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = frame.motion_vectors.Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = readback.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = layout;
+            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            const auto back = transition_barrier(frame.motion_vectors.Get(),
+                                                 D3D12_RESOURCE_STATE_COPY_SOURCE, frame.resource_state);
+            list->ResourceBarrier(1, &back);
+        });
+        void* mapped = nullptr;
+        require_hresult(readback->Map(0, nullptr, &mapped), "map composed vectors");
+        const auto half_to_float = [](std::uint16_t h) {
+            const std::uint32_t sign = (std::uint32_t(h) & 0x8000U) << 16;
+            const std::uint32_t exponent = (h >> 10) & 0x1FU;
+            const std::uint32_t mantissa = h & 0x3FFU;
+            const std::uint32_t bits =
+                exponent == 0 ? sign : sign | ((exponent + 112U) << 23) | (mantissa << 13);
+            float value{};
+            std::memcpy(&value, &bits, sizeof(value));
+            return value;
+        };
+        std::vector<float> xs;
+        const auto* row = static_cast<const std::byte*>(mapped) + layout.Offset +
+                          std::size_t(height / 2) * layout.Footprint.RowPitch;
+        for (UINT x = width / 4; x < 3 * width / 4; ++x) {
+            std::uint16_t h{};
+            std::memcpy(&h, row + std::size_t(x) * 4, sizeof(h));
+            xs.push_back(half_to_float(h));
+        }
+        readback->Unmap(0, nullptr);
+        return xs;
+    };
+    constexpr float motion = -10.0F;
+    // Into the other eye: followed on to this eye's previous image.
+    const auto [cross_set, cross] = run(shift + motion / 2, -shift + motion / 2, true);
+    require(cross && cross != cross_set && cross->eyes[0] && !cross->eyes[0]->bridge &&
+                cross->eyes[0]->motion_vectors.Get() != cross_set->eyes[0]->motion_vectors.Get(),
+        "a bridged eye's vectors were not given a texture of their own");
+    for (const float x : read(*cross->eyes[0])) {
+        require(std::abs(x - motion) < 0.5F,
+                "vectors into the other eye did not reach this eye's previous image");
+    }
+    // Into its own previous image already: copied unchanged.
+    const auto [own_set, own] = run(motion, motion, true);
+    for (const float x : read(*own->eyes[0])) {
+        require(std::abs(x - motion) < 0.5F, "vectors into this eye's own previous image were changed");
+    }
+    // Without a bridge nothing is recorded.
+    const auto [plain_set, plain] = run(motion, motion, false);
+    require(plain == plain_set, "an eye without a bridge was composed");
+    require(composer.composed() == 2, "the composer's count did not follow the bridged eyes");
 }
 
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
@@ -6719,6 +6841,15 @@ int main() {
             bench_frame_generation_methods();
             return 0;
         }
+        // The guide resolver's and composer's tests alone.
+        if (std::getenv("XRFG_TEST_GUIDES_ONLY")) {
+            D3D12WarpFixture guides_fixture;
+            test_dlss_motion_vector_stereo_stream_pairing(guides_fixture);
+            test_dlss_motion_vector_per_eye_swapchains(guides_fixture);
+            test_guide_composer(guides_fixture);
+            std::cout << "guide tests passed" << std::endl;
+            return 0;
+        }
 #ifdef XRFG_NATIVE_DLSSG
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP")) {
             D3D12WarpFixture bench_fixture(true);
@@ -6788,6 +6919,7 @@ int main() {
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
         test_dlss_motion_vector_per_eye_swapchains(fixture);
+        test_guide_composer(fixture);
         test_dlss_guide_snapshots_copy_only_the_read_region(fixture);
         test_dlss_motion_vector_gpu_ingress(fixture);
         test_dlss_motion_vector_side_by_side(fixture);

@@ -38,6 +38,7 @@ struct StreamState {
     std::uint64_t first_publication{};
     float jitter_x{};
     float jitter_y{};
+    std::shared_ptr<const DlssMotionVectorFrame> older;
     std::shared_ptr<const DlssMotionVectorFrame> previous;
     std::shared_ptr<const DlssMotionVectorFrame> latest;
     std::array<SnapshotSlot, kSnapshotSlotCount> snapshots;
@@ -291,6 +292,7 @@ struct Candidate {
     std::uint64_t first_publication{};
     std::shared_ptr<const DlssMotionVectorFrame> frame;
     std::shared_ptr<const DlssMotionVectorFrame> previous;
+    std::shared_ptr<const DlssMotionVectorFrame> older;
 };
 
 // Where an eye's DLSS inputs sit in their render targets. Both eyes often
@@ -319,6 +321,7 @@ void publish_dlss_motion_vectors(
         if (publication.reset) {
             ++stream.epoch;
             stream.serial = 0;
+            stream.older.reset();
             stream.previous.reset();
             stream.latest.reset();
         }
@@ -407,6 +410,7 @@ void publish_dlss_motion_vectors(
         if (stream.first_publication == 0) {
             stream.first_publication = frame->publication;
         }
+        stream.older = std::move(stream.previous);
         stream.previous = std::move(stream.latest);
         stream.latest = std::move(frame);
         if (state.statistics.used == 0) {
@@ -441,6 +445,7 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
             stream.first_publication = 0;
             stream.jitter_x = 0.0F;
             stream.jitter_y = 0.0F;
+            stream.older.reset();
             stream.previous.reset();
             stream.latest.reset();
         }
@@ -520,7 +525,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             ++streams_with_frames;
             if (same_identity(stream.latest->producer_queue.Get(), consumer_queue)) {
                 candidates.push_back(
-                    {stream.first_publication, stream.latest, stream.previous});
+                    {stream.first_publication, stream.latest, stream.previous, stream.older});
             }
         }
         // The streams evaluated on this image's queue, before any is set aside
@@ -675,6 +680,15 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
             if (shared_stream) {
                 frame->previous_serial = frame->serial > 2 ? frame->serial - 2 : 0;
+                // The other eye's evaluation between this eye's two.
+                for (const auto& candidate : candidates) {
+                    for (const auto& bridge : {candidate.frame, candidate.previous, candidate.older}) {
+                        if (bridge && bridge->stream == chosen->stream &&
+                            bridge->epoch == chosen->epoch && bridge->serial + 1 == chosen->serial) {
+                            frame->bridge = bridge;
+                        }
+                    }
+                }
             }
             auto result = std::make_shared<DlssMotionVectorSet>();
             result->eye_count = 1;

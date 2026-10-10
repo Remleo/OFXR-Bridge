@@ -100,6 +100,14 @@ struct DlssMotionVectorFrame {
     std::uint32_t source_depth_x{};
     // Whether the game gave DLSS its frame time.
     bool frame_time_known{};
+    // For an eye whose DLSS stream also evaluates the other eye: the stream's
+    // evaluation just before this one, the other eye's. A game that renders
+    // both eyes through one view - UEVR's Synchronized Sequential and AFR
+    // without its ghosting fix - writes each eye's vectors from the view's
+    // previous frame, which is that other eye's, not this eye's previous image;
+    // the bridge's own vectors lead on from there to it
+    // (D3D12GuideComposer). Never set on the bridge itself.
+    std::shared_ptr<const DlssMotionVectorFrame> bridge;
 };
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;
