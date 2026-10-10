@@ -251,6 +251,11 @@ int main(int argc, char** argv) {
         input.native_single_frame = true;
         text = status_panel_text(input);
         require(line_labelled(text, "Running").text == "DLSS Frame Generation 67%, 2X", "native running");
+        input.running.native_camera = true;
+        require(line_labelled(status_panel_text(input), "Running").text ==
+                    "DLSS Frame Generation 67% + camera, 2X",
+                "native with the camera's motion");
+        input.running.native_camera = false;
         require(has_line(text, "makes one frame: 2X", PanelTone::warn), "native single frame");
         require(line_labelled(text, "Guides").text == "used on 100% of pairs", "native guides");
         input.native_available = false;

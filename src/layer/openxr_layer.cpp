@@ -5761,6 +5761,8 @@ XrResult layer_create_session_impl(
         initial_control.desired.backward,
         static_cast<xrfg::D3D12FrameGeneration>(initial_control.desired.frame_generation),
         static_cast<std::uint32_t>(initial_control.desired.native_scale)};
+    state->nvidia_options.native_camera =
+        xrfg::implicit_layer::read_native_dlssg_camera(current_layer_directory());
     // One display period of extra depth, bought with one display period of
     // latency: every synthetic is held until it is a period old, so synthesis
     // gets a period to finish instead of the gap the game leaves. On by
@@ -13007,6 +13009,7 @@ void apply_embedded_control(
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         static_cast<xrfg::D3D12FrameGeneration>(control.desired.frame_generation),
         static_cast<std::uint32_t>(control.desired.native_scale)};
+    options.native_camera = xrfg::implicit_layer::read_native_dlssg_camera(current_layer_directory());
     const bool dlss_motion_vectors =
         control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
     // A control change also takes up the ini's choice of extrapolation warp,
@@ -13027,6 +13030,7 @@ void apply_embedded_control(
         options.bidirectional != state->nvidia_options.bidirectional ||
         options.frame_generation != state->nvidia_options.frame_generation ||
         options.native_scale != state->nvidia_options.native_scale ||
+        options.native_camera != state->nvidia_options.native_camera ||
         options.hybrid != state->nvidia_options.hybrid ||
         options.extrapolate != state->nvidia_options.extrapolate ||
         options.extrapolate_mesh != state->nvidia_options.extrapolate_mesh;
@@ -13471,6 +13475,7 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
     auto& asked = input.asked;
     asked.native = layer::read_frame_generation(directory) == layer::ConfiguredFrameGeneration::native_dlss;
     asked.native_scale = layer::read_native_dlssg_scale(directory);
+    asked.native_camera = layer::read_native_dlssg_camera(directory);
     asked.flow = layer::read_flow_backend(directory) == layer::ConfiguredFlowBackend::nvidia
         ? xrfg::PanelFlow::nvidia : xrfg::PanelFlow::fidelity_fx;
     const auto configured = layer::read_nvidia_options(directory);
@@ -13496,6 +13501,7 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
     auto& session = input.session;
     session.native = desired.frame_generation == 1;
     session.native_scale = desired.native_scale;
+    session.native_camera = state->nvidia_options.native_camera;
     session.flow = desired.backend == 1 ? xrfg::PanelFlow::nvidia : xrfg::PanelFlow::fidelity_fx;
     session.preset = static_cast<xrfg::PanelPreset>(desired.preset);
     session.flow_scale = panel_scale_percent(desired.scale);
@@ -13512,6 +13518,7 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
     auto& running = input.running;
     running.native = options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss;
     running.native_scale = static_cast<int>(options.native_scale);
+    running.native_camera = options.native_camera;
     running.flow = state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia
         ? xrfg::PanelFlow::nvidia : xrfg::PanelFlow::fidelity_fx;
     running.preset = static_cast<xrfg::PanelPreset>(options.preset);

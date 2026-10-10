@@ -180,7 +180,9 @@ enum class Engine {
     const std::string warp = method.mesh ? "" : " (gather)";
     switch (engine) {
     case Engine::none: return "Real frames only";
-    case Engine::native: return "DLSS Frame Generation " + std::to_string(method.native_scale) + "%";
+    case Engine::native:
+        return "DLSS Frame Generation " + std::to_string(method.native_scale) + "%" +
+            (method.native_camera ? " + camera" : "");
     case Engine::extrapolate_flow: return "Extrapolate" + warp + ", FidelityFX flow";
     case Engine::extrapolate_vectors: return "Extrapolate" + warp + ", DLSS vectors and depth";
     case Engine::extrapolate_both: return "Extrapolate" + warp + ", DLSS vectors + FidelityFX flow";
@@ -385,7 +387,8 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
         pending.frames = input.session.frames;
         pending = normalized(pending);
         const auto same = [](const PanelMethod& a, const PanelMethod& b) {
-            return a.native == b.native && (!a.native || a.native_scale == b.native_scale) &&
+            return a.native == b.native &&
+                (!a.native || (a.native_scale == b.native_scale && a.native_camera == b.native_camera)) &&
                 a.flow == b.flow && a.preset == b.preset && a.flow_scale == b.flow_scale &&
                 a.both_ways == b.both_ways && a.game_vectors == b.game_vectors &&
                 a.hybrid == b.hybrid && a.extrapolate == b.extrapolate &&

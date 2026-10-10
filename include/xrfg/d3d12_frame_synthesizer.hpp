@@ -144,6 +144,11 @@ struct D3D12NvidiaOpticalFlowOptions {
     // Below 100 NVIDIA generates a smaller frame and the bridge restores the
     // real frames' detail; on recorded game frames 67 beat 100 for less time.
     std::uint32_t native_scale{67};
+    // Native DLSS Frame Generation fits the camera's own motion to each
+    // pair's vectors and hands it to NGX with object-only vectors, a feature
+    // per eye: a third-person character the camera orbits stops smearing,
+    // for more GPU time (D3D12NativeDlssG::initialize's camera).
+    bool native_camera{};
     // With the FidelityFX backend and the game's DLSS vectors, run the flow
     // as well and take, per pixel, whichever of the two explains both frames
     // better.

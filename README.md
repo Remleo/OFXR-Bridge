@@ -94,6 +94,19 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   hold half the refresh rate rather than a third: on an RTX 40 card with a
   game that only just holds half, OFXR's own 3X is the better choice. The
   tray's 3X entry and the in-VR status panel say so.
+- **The camera's own motion, if you ask for it.** NGX is normally told the
+  camera stands still: the previous frame is aligned by the head's turn and
+  the game's vectors carry everything else, which NGX reads as objects
+  moving. A third-person camera orbiting its character then smears the
+  character into the scene sliding past. With **DLSS Frame Generation
+  camera motion** on (`dlssg_camera=1`), the bridge fits the camera's
+  motion to each pair's vectors and depth on the GPU, hands it to NGX with
+  the next pair, takes it out of the vectors and tells NGX the vectors carry
+  object motion alone, which is NGX's own contract. On recorded Stellar
+  Blade turns about the character the error where the scene moved fell from
+  9.1 to 8.0 on fast turns and from 9.4 to 9.0 on slower ones. It needs an
+  NGX feature per eye, so it costs about a quarter more GPU time (2.5
+  against 2.0 ms a pair at 3004x3004), and is off by default.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and
@@ -207,9 +220,9 @@ vectors.
 
 | Where | Setting |
 |---|---|
-| Tray settings | `[tray] dlssg_resolution=67` |
+| Tray settings | `[tray] dlssg_resolution=67`, `[tray] dlssg_camera=1` for the camera's motion |
 | A directly loaded layer | `[ofxr] dlssg_resolution=67` (25 to 100) |
-| A running game | `OFXR_RequestNativeDlssgScaleV2(67)` |
+| A running game | `OFXR_RequestNativeDlssgScaleV2(67)` (the resolution; the camera's motion is read when the game starts) |
 
 Environment variables for experiments and diagnostics. Set them before you
 launch the game:
@@ -217,6 +230,7 @@ launch the game:
 | Variable | Effect |
 |---|---|
 | `XRFG_NATIVE_DLSSG_PER_EYE=1` | A feature per eye instead of the shared one. |
+| `XRFG_NATIVE_DLSSG_CAMERA=1` (or 0) | The camera's motion fitted and handed to NGX, whatever the ini says. |
 | `XRFG_NATIVE_DLSSG_SEAM` | Overrides the seam width. Without a seam the eyes visibly bleed into each other. |
 | `XRFG_TEST_NATIVE_DLSSG_DECISIONS=1` | Logs the GPU's choice for each pair, generated image or current frame, to `ofxr-native-decisions-pid*-instance*.log` beside the layer DLL. It is not a frame-rate benchmark. |
 | `XRFG_TEST_NATIVE_DLSSG_RESEED_EVERY_PAIR` | Makes every pair take the turning-head reseed, so its cost can be measured with the headset still. |

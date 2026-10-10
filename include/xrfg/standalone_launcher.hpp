@@ -37,6 +37,10 @@ struct LauncherSettings {
     // the layer's dlssg_resolution, 67 by default. On recorded game frames
     // 67 erred less than 100, which costs more GPU time.
     int native_scale{67};
+    // The layer's dlssg_camera: native DLSS Frame Generation fits the
+    // camera's own motion to each pair and hands it to NGX, a feature per
+    // eye. Off by default: more GPU time, for third-person camera turns.
+    bool native_camera{};
     // NVIDIA optical flow, medium, is the default: the layer falls back to
     // FidelityFX on its own where NVIDIA cannot initialise, so the default
     // can be the better backend without a GPU check here.

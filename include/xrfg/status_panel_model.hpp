@@ -89,6 +89,8 @@ struct PanelMethod {
     // eye's. Everything below it is OFXR's own.
     bool native{};
     int native_scale{67};
+    // The camera's motion fitted and handed to NGX, a feature per eye.
+    bool native_camera{};
     // The optical flow OFXR falls back on, or runs beside the game's vectors
     // in the hybrid; its input in percent per axis.
     PanelFlow flow{PanelFlow::fidelity_fx};

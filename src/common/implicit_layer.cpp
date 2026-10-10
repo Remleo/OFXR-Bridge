@@ -231,6 +231,12 @@ ConfiguredFrameGeneration read_frame_generation(const std::filesystem::path& dir
     return _wcsicmp(value,L"dlss") == 0 ? ConfiguredFrameGeneration::native_dlss : ConfiguredFrameGeneration::ofxr;
 }
 
+bool read_native_dlssg_camera(const std::filesystem::path& directory) noexcept {
+    if (directory.empty()) return false;
+    const auto ini = directory / L"ofxr_bridge.ini";
+    return GetPrivateProfileIntW(L"ofxr", L"dlssg_camera", 0, ini.c_str()) != 0;
+}
+
 int read_native_dlssg_scale(const std::filesystem::path& directory) noexcept {
     if (directory.empty()) return kDefaultNativeDlssgScale;
     const auto ini = directory / L"ofxr_bridge.ini";

@@ -190,6 +190,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "dlssg_resolution") {
                     const int percent = std::atoi(value.c_str());
                     settings.native_scale = percent >= 25 && percent <= 100 ? percent : 67;
+                } else if (key == "dlssg_camera") {
+                    settings.native_camera = value == "1" || lower_ascii(value) == "true";
                 } else if (key == "backend") {
                     settings.backend = lower_ascii(value) == "nvidia"
                         ? FlowBackend::nvidia
@@ -272,6 +274,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
     return "[tray]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
+           "\r\ndlssg_camera=" + (settings.native_camera ? "1" : "0") +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +
            "\r\nnvidia_input_scale=" +
@@ -513,6 +516,7 @@ std::string build_runtime_ini(
     return "[ofxr]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
+           "\r\ndlssg_camera=" + (settings.native_camera ? "1" : "0") +
            "\r\nmotion_vectors=dlss" +
            "\r\ndlss_flow_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
            "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +

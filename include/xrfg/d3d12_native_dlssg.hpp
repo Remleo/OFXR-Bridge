@@ -33,10 +33,16 @@ class D3D12NativeDlssG final {
     D3D12NativeDlssG();
     ~D3D12NativeDlssG();
     // scale is the feature's resolution in percent of each eye's, 25 to 100;
-    // XRFG_NATIVE_DLSSG_SCALE overrides it.
+    // XRFG_NATIVE_DLSSG_SCALE overrides it. camera fits the camera's own
+    // motion to each pair's vectors and depth on the GPU and hands it to the
+    // next pair: the pack takes the camera's flow out of the vectors and NGX
+    // is told they carry object motion alone, with the camera's motion in
+    // its matrices, which is its contract. A third-person character the
+    // camera orbits then stops smearing. It needs a feature per eye, so it
+    // costs more GPU; XRFG_NATIVE_DLSSG_CAMERA overrides it.
     HRESULT initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
                        const D3D12_RESOURCE_DESC &source, DXGI_FORMAT view_format,
-                       UINT scale = 100) noexcept;
+                       UINT scale = 100, bool camera = false) noexcept;
     // S_FALSE means the pair was not generated and no output was written. The
     // list may still hold NGX history work, so call submitted() for any list
     // that is executed after record(), whatever it returned.
@@ -65,6 +71,19 @@ class D3D12NativeDlssG final {
     // contract has it, and adds the camera's back from the matrices.
     void set_test_camera_motion(UINT eye, const float *clip_to_previous,
                                 const float *rigid = nullptr) noexcept;
+    // The last camera motion the GPU fitted for an eye and accepted: its
+    // angle in degrees, its translation in the depth's units, the median
+    // residual in eye pixels, the inliers and the points fitted.
+    struct CameraFit {
+        float degrees{};
+        std::array<float, 3> translation{};
+        float residual_px{};
+        UINT inliers{}, points{};
+    };
+    [[nodiscard]] std::optional<CameraFit> last_camera_fit(UINT eye) const noexcept;
+    // Fits accepted and refused since initialize.
+    [[nodiscard]] std::uint64_t camera_fits_used() const noexcept;
+    [[nodiscard]] std::uint64_t camera_fits_rejected() const noexcept;
 
   private:
     struct Impl;

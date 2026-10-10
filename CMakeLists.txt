@@ -330,14 +330,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
            NOT EXISTS "${XRFG_DLSSG_RUNTIME}")
             message(FATAL_ERROR "XRFG_NATIVE_DLSSG requires a complete NVIDIA DLSS SDK at XRFG_DLSS_SDK_ROOT")
         endif()
-        foreach(stage pack seed vertex pixel)
+        foreach(stage pack seed fit vertex pixel)
             set(header "${XRFG_GENERATED_SHADER_DIR}/native_dlssg_${stage}_shader.hpp")
+            set(stage_defines "")
             if(stage STREQUAL "pack")
                 set(profile cs_5_1)
                 set(entry PackNativeDlssG)
             elseif(stage STREQUAL "seed")
                 set(profile cs_5_1)
                 set(entry SeedNativeDlssG)
+            elseif(stage STREQUAL "fit")
+                set(profile cs_5_1)
+                set(entry FitNativeDlssGCamera)
+                # The fit's groupshared state is for compute alone.
+                set(stage_defines /DXRFG_NATIVE_DLSSG_FIT=1)
             elseif(stage STREQUAL "vertex")
                 set(profile vs_5_1)
                 set(entry NativeDlssGVS)
@@ -347,7 +353,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             endif()
             add_custom_command(OUTPUT "${header}"
                 COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
-                COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ${profile} /E ${entry}
+                COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ${profile} /E ${entry} ${stage_defines}
                     /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect /Fh "${header}"
                     /Vn g_xrfg_native_dlssg_${stage}_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/native_dlssg.hlsl"
                 DEPENDS src/d3d12/native_dlssg.hlsl VERBATIM)

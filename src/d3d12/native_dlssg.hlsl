@@ -8,6 +8,8 @@ Texture2D<float4> Packed : register(t6);
 RWTexture2D<float4> Color : register(u0);
 RWTexture2D<float2> Motion : register(u1);
 RWTexture2D<float> Depth : register(u2);
+// The camera fit's result for the CPU (FitNativeDlssGCamera).
+RWBuffer<float> Fit : register(u3);
 
 cbuffer Params : register(b0) {
     uint2 Extent;
@@ -48,15 +50,17 @@ cbuffer Params : register(b0) {
     // B's field of view and rectangle. CurrentFallback holds A in the compose.
     uint SyntheticCamera;
     float4 SyntheticRotation;
-    // Tests: the camera's own motion from B to the aligned A, a rotation and
-    // (CameraMove.xyz) a translation taking B's camera space to A's, in the
-    // depth's units. CameraMove.w and DepthToZ linearise a depth d into that
-    // distance, w / (d * DepthToZ.x + DepthToZ.y); with w zero the vectors
-    // are written whole, otherwise less the camera's flow, which NGX is then
-    // told to add back from its matrices.
+    // The camera's own motion from B to the aligned A, a rotation and a
+    // translation taking B's camera space to A's, in the depth's units: the
+    // previous pair's fit, or a test's. With CameraRotation.w zero the
+    // vectors are written whole; otherwise less the camera's flow, which NGX
+    // is then told to add back from its matrices. DepthToZA and DepthToZBC
+    // linearise a depth d into the distance along the view,
+    // DepthToZA / (d * DepthToZBC.x + DepthToZBC.y).
     float4 CameraRotation;
-    float4 CameraMove;
-    float2 DepthToZ;
+    float3 CameraMove;
+    float DepthToZA;
+    float2 DepthToZBC;
 };
 
 float3 rotate(float3 ray, float4 q) {
@@ -238,13 +242,13 @@ float4 packed_color(Texture2DArray<float4> t, uint2 p) {
     int2 dp = clamp(int2(DepthRect.xy + uv * DepthRect.zw), depth_lo, depth_hi);
     float2 motion = towards_a(uv);
     float depth = SourceDepth.Load(int4(dp, GuideSlice, 0));
-    if (CameraMove.w != 0) {
+    if (CameraRotation.w != 0) {
         // Where the camera's own motion alone would have taken this pixel's
         // surface: the vector less that is the object's own motion.
-        float z = CameraMove.w / max(depth * DepthToZ.x + DepthToZ.y, 1e-7);
+        float z = DepthToZA / max(depth * DepthToZBC.x + DepthToZBC.y, 1e-7);
         float3 b_point = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
                                 lerp(TargetTangents.z, TargetTangents.w, uv.y), -1) * z;
-        float3 a_point = rotate(b_point, CameraRotation) + CameraMove.xyz;
+        float3 a_point = rotate(b_point, CameraRotation) + CameraMove;
         motion -= source_uv(a_point, TargetTangents) - uv;
     }
     // As a fraction of the whole feature, which may hold both eyes.
@@ -346,3 +350,208 @@ float4 NativeDlssGPS(Vertex input) : SV_Target {
     float3 restored = generated + (high - low) * weight;
     return float4(EncodeSrgb != 0 ? decode_srgb(restored) : saturate(restored), current.a);
 }
+
+// Fits the camera's own motion between the two frames to the vectors just
+// packed for B: a rotation and a translation taking B's camera space to the
+// aligned A's, by Gauss-Newton on the reprojection error over a 32x32 grid
+// of the eye, keeping the closer seven tenths of the points from the third
+// sweep on (the rest moves on its own: the character the camera orbits).
+// One group of 256 threads per eye, 4 points each, which it reads again
+// each sweep. A single group runs alone on the GPU, so its work is kept
+// small: a 64x64 grid and 16 sweeps cost 0.6 ms a pair at 3004x3004 and
+// measured the same. The result goes to Fit for the CPU, which hands it to
+// the next pair: the rotation as an axis-angle (0-2), the translation
+// (3-5), the inliers (6), the points fitted (7), the median residual over
+// the points in eye pixels (8), 1 for a fit made (9) and the inlier cut
+// (10).
+#ifdef XRFG_NATIVE_DLSSG_FIT
+#define FIT_GRID 32
+#define FIT_THREADS 256
+#define FIT_PER_THREAD 4
+#define FIT_SWEEPS 10
+#define FIT_BINS 32
+groupshared float g_sum[27][FIT_THREADS];
+// The normal equations, solved by one thread: in group memory so no thread
+// carries them in registers.
+groupshared float g_m[6][7];
+groupshared float g_x[6];
+groupshared float g_cut;
+groupshared uint g_hist[FIT_BINS];
+groupshared uint g_valid;
+groupshared uint g_inliers;
+
+float3 fit_rotate(float3 v, float3 w) {
+    float a = length(w);
+    float3 k = w / max(a, 1e-9);
+    float c = cos(a), s = sin(a);
+    return v * c + cross(k, v) * s + k * dot(k, v) * (1 - c);
+}
+// Where x takes a point of B against where its vector says it was, in eye
+// pixels.
+float2 fit_residual(float x[6], float3 b, float2 target) {
+    float3 p = fit_rotate(b, float3(x[0], x[1], x[2])) + float3(x[3], x[4], x[5]);
+    return (source_uv(p, TargetTangents) - target) * float2(Extent);
+}
+// Residual bins doubling from a sixteenth of a pixel.
+uint fit_bin(float r) {
+    return uint(clamp(floor(log2(max(r, 1.0 / 16.0))) + 4.0, 0.0, FIT_BINS - 1.0));
+}
+float fit_bin_edge(uint bin) {
+    return exp2(float(bin) - 3.0);
+}
+// The residual below which `keep` of the histogram's points lie, taken as
+// evenly spread within the bin the count crosses in: a cut at a bin's edge
+// alone kept up to a whole bin of the points the fit should drop.
+float fit_percentile(uint keep) {
+    uint seen = 0;
+    [loop] for (uint bin = 0; bin < FIT_BINS; ++bin) {
+        const uint count = g_hist[bin];
+        if (seen + count >= keep) {
+            const float lo = bin == 0 ? 0.0 : fit_bin_edge(bin - 1), hi = fit_bin_edge(bin);
+            return lo + (hi - lo) * float(keep - seen) / max(float(count), 1.0);
+        }
+        seen += count;
+    }
+    return fit_bin_edge(FIT_BINS - 1);
+}
+// The point of the grid a thread fits, read from the packed guides: its place
+// in B's camera and where its vector says it was, in the eye's UV. Points are
+// read again each sweep rather than kept, which keeps the registers down.
+bool fit_point(uint index, out float3 b, out float2 target) {
+    const float2 uv = (float2(index % FIT_GRID, index / FIT_GRID) + 0.5) / FIT_GRID;
+    const float2 guide_limit = float2(float(EyeX + FeatureExtent.x) * GuideScale.x,
+                                      float(FeatureExtent.y) * GuideScale.y) - 1;
+    const uint2 g = uint2(clamp(float2(float(EyeX) + uv.x * FeatureExtent.x,
+                                       uv.y * FeatureExtent.y) * GuideScale, 0, guide_limit));
+    const float2 m = Motion[g] / (float2(FeatureExtent) * MotionNormal);
+    const float d = Depth[g];
+    const float z = clamp(DepthToZA / max(d * DepthToZBC.x + DepthToZBC.y, 1e-9), 1e-4, 1e7);
+    b = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
+               lerp(TargetTangents.z, TargetTangents.w, uv.y), -1) * z;
+    target = uv + m;
+    return all(isfinite(m)) && all(abs(m) <= 1) && isfinite(d);
+}
+
+[numthreads(FIT_THREADS, 1, 1)] void FitNativeDlssGCamera(uint3 id : SV_GroupThreadID) {
+    const uint t = id.x;
+    if (t == 0) {
+        g_valid = 0;
+        g_inliers = 0;
+        g_cut = 1e30;
+    }
+    if (t < 6) g_x[t] = 0;
+    GroupMemoryBarrierWithGroupSync();
+    [loop] for (uint k0 = 0; k0 < FIT_PER_THREAD; ++k0) {
+        float3 b;
+        float2 target;
+        if (fit_point(k0 * FIT_THREADS + t, b, target)) InterlockedAdd(g_valid, 1);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    const float step[6] = {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2};
+    [loop] for (uint sweep = 0; sweep < FIT_SWEEPS; ++sweep) {
+        float x[6];
+        [unroll] for (uint c0 = 0; c0 < 6; ++c0) x[c0] = g_x[c0];
+        const float cut = g_cut;
+        if (t < FIT_BINS) g_hist[t] = 0;
+        GroupMemoryBarrierWithGroupSync();
+        float hs[21], bs[6];
+        [unroll] for (uint q0 = 0; q0 < 21; ++q0) hs[q0] = 0;
+        [unroll] for (uint a0 = 0; a0 < 6; ++a0) bs[a0] = 0;
+        [loop] for (uint k = 0; k < FIT_PER_THREAD; ++k) {
+            float3 b;
+            float2 target;
+            if (!fit_point(k * FIT_THREADS + t, b, target)) continue;
+            const float2 r0 = fit_residual(x, b, target);
+            const float norm = length(r0);
+            InterlockedAdd(g_hist[fit_bin(norm)], 1);
+            // From the third sweep, the closer seven tenths by the residuals
+            // of the sweep before.
+            if (sweep >= 2 && norm > cut) continue;
+            float2 jac[6];
+            [unroll] for (uint c = 0; c < 6; ++c) {
+                float xs[6];
+                [unroll] for (uint e = 0; e < 6; ++e) xs[e] = x[e];
+                xs[c] += step[c];
+                jac[c] = (fit_residual(xs, b, target) - r0) / step[c];
+            }
+            uint q = 0;
+            [unroll] for (uint a = 0; a < 6; ++a) {
+                bs[a] -= dot(jac[a], r0);
+                [unroll] for (uint c1 = a; c1 < 6; ++c1) {
+                    hs[q] += dot(jac[a], jac[c1]);
+                    ++q;
+                }
+            }
+        }
+        [unroll] for (uint q2 = 0; q2 < 21; ++q2) g_sum[q2][t] = hs[q2];
+        [unroll] for (uint a2 = 0; a2 < 6; ++a2) g_sum[21 + a2][t] = bs[a2];
+        GroupMemoryBarrierWithGroupSync();
+        if (t < 27) {
+            float s = 0;
+            [loop] for (uint i = 0; i < FIT_THREADS; ++i) s += g_sum[t][i];
+            g_sum[t][0] = s;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (t == 0) {
+            // The normal equations, damped a little against a view that pins
+            // the translation poorly (sky), by elimination with pivoting.
+            uint q3 = 0;
+            [unroll] for (uint a3 = 0; a3 < 6; ++a3) {
+                [unroll] for (uint c3 = a3; c3 < 6; ++c3) {
+                    g_m[a3][c3] = g_sum[q3][0];
+                    g_m[c3][a3] = g_sum[q3][0];
+                    ++q3;
+                }
+                g_m[a3][6] = g_sum[21 + a3][0];
+            }
+            [unroll] for (uint d0 = 0; d0 < 6; ++d0) g_m[d0][d0] += 1e-4 * abs(g_m[d0][d0]) + 1e-12;
+            bool solved = true;
+            [unroll] for (uint c4 = 0; c4 < 6; ++c4) {
+                uint pivot = c4;
+                [unroll] for (uint r = c4 + 1; r < 6; ++r) if (abs(g_m[r][c4]) > abs(g_m[pivot][c4])) pivot = r;
+                if (abs(g_m[pivot][c4]) < 1e-20) solved = false;
+                if (pivot != c4) {
+                    [unroll] for (uint e1 = 0; e1 < 7; ++e1) { float tmp = g_m[c4][e1]; g_m[c4][e1] = g_m[pivot][e1]; g_m[pivot][e1] = tmp; }
+                }
+                [unroll] for (uint r2 = c4 + 1; r2 < 6; ++r2) {
+                    const float factor = g_m[r2][c4] / g_m[c4][c4];
+                    [unroll] for (uint e2 = c4; e2 < 7; ++e2) g_m[r2][e2] -= factor * g_m[c4][e2];
+                }
+            }
+            if (solved) {
+                float dx[6];
+                [unroll] for (int c5 = 5; c5 >= 0; --c5) {
+                    float s = g_m[c5][6];
+                    [unroll] for (int e3 = c5 + 1; e3 < 6; ++e3) s -= g_m[c5][e3] * dx[e3];
+                    dx[c5] = s / g_m[c5][c5];
+                }
+                [unroll] for (uint c6 = 0; c6 < 6; ++c6) g_x[c6] += dx[c6];
+            }
+            if (sweep >= 1) g_cut = fit_percentile((g_valid * 7 + 9) / 10);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    // The inliers by the last sweep's cut, and the median residual over the
+    // points, from the last sweep's histogram.
+    {
+        const float cut = g_cut;
+        float x[6];
+        [unroll] for (uint c7 = 0; c7 < 6; ++c7) x[c7] = g_x[c7];
+        [loop] for (uint k2 = 0; k2 < FIT_PER_THREAD; ++k2) {
+            float3 b;
+            float2 target;
+            if (!fit_point(k2 * FIT_THREADS + t, b, target)) continue;
+            if (length(fit_residual(x, b, target)) <= cut) InterlockedAdd(g_inliers, 1);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (t == 0) {
+        [unroll] for (uint c8 = 0; c8 < 6; ++c8) Fit[c8] = g_x[c8];
+        Fit[6] = float(g_inliers);
+        Fit[7] = float(g_valid);
+        Fit[8] = fit_percentile((g_valid + 1) / 2);
+        Fit[9] = 1;
+        Fit[10] = g_cut;
+    }
+}
+#endif

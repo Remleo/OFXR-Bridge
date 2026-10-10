@@ -72,6 +72,7 @@ enum MenuCommand : UINT {
     overlay_lower_left = 124,
     overlay_lower_right = 125,
     open_logs = 130,
+    toggle_dlssg_camera = 134,
     dlssg_scale_full = 131,
     dlssg_scale_two_thirds = 132,
     dlssg_scale_half = 133,
@@ -1166,6 +1167,13 @@ void show_context_menu(AppState& state) {
             }
             append_submenu(quality, native_scales, L"DLSS Frame Generation resolution", native);
         }
+        // The camera's own motion, fitted to each pair's vectors and handed
+        // to NGX with object-only vectors: a third-person character the
+        // camera orbits stops smearing (Stellar Blade's fast turns erred 7.5
+        // against 9.1). It takes a feature per eye, so more GPU time.
+        append_entry(quality, toggle_dlssg_camera,
+                     L"DLSS Frame Generation camera motion (third-person turns, more GPU)",
+                     settings.native_camera, native, false);
 #endif
         append_separator(quality);
         // 3X needs what "Prefer FPS over latency" sets up, so it holds that
@@ -1310,6 +1318,12 @@ void handle_command(AppState& state, UINT command) {
         state.settings.native_scale = command == dlssg_scale_full ? 100
             : command == dlssg_scale_two_thirds ? 67 : 50;
         update_runtime_options(state, L"DLSS Frame Generation will use this resolution the next time the game starts.");
+        break;
+    case toggle_dlssg_camera:
+        state.settings.native_camera = !state.settings.native_camera;
+        update_runtime_options(state, state.settings.native_camera
+            ? L"DLSS Frame Generation will follow the camera's motion the next time the game starts: a feature per eye, more GPU time."
+            : L"DLSS Frame Generation will share one feature between the eyes the next time the game starts.");
         break;
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;

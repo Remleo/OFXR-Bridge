@@ -1217,10 +1217,45 @@ measured 9.37 on the Steam Frame set, with higher SSIM on the slow triplets
 (3004x3004 an eye, 44 game frames a second, the camera still) replayed the
 same with and without, 11.39 at 67% and 9.96 at 100%, and its live generated
 frames sat midway: each as far from the frame before as from the frame
-after, 11 against 21 between the two. Live, object motion needs a feature
-per eye (one clip space per evaluation, 11-28% more GPU) and the camera's
-motion a frame late, from a fit on the GPU or from UEVR's view callback; it
-is not built.
+after, 11 against 21 between the two.
+
+Live, that is `[ofxr] dlssg_camera=1` (the tray's **DLSS Frame Generation
+camera motion**, `XRFG_NATIVE_DLSSG_CAMERA` overriding it), off by default.
+It needs a feature per eye, since one evaluation has one clip space, and
+the camera's motion comes from the GPU a pair late: after each eye's pack a
+compute shader (`FitNativeDlssGCamera`, one group of 256 threads an eye)
+fits a rotation and translation to the vectors and depth just packed, over
+a 32x32 grid of the eye, by ten Gauss-Newton sweeps on the reprojection
+error with numeric Jacobians, keeping from the third sweep the closer seven
+tenths of the points by the sweep before's residuals (a histogram in group
+memory, the cut read off inside its bin). The result is copied to a
+readback buffer the pair's completion fence guards; `poll_fits` reads it
+before the next record, and a fit with a quarter of the points as inliers, a
+median residual under 48 eye pixels and a turn under a radian is kept for
+the eye's stream. A pair whose A is that fit's B, or at most two pairs on,
+packs its vectors less the camera's flow (`depth_to_z` linearises the
+depth, the pack unprojects, moves and projects each guide texel) and
+evaluates with the matrices from the same motion and camera motion not
+included. Fits that fail or lag leave the pair as before. Replayed, with
+the generating pair run twice so the second has the first's fit
+(`XRFG_TEST_REPLAY_NATIVE_GPU_FIT=1`), error where the scene moved:
+
+| Set | Base 67% / 100% | GPU fit 67% / 100% | CPU fit, for reference |
+|---|---|---|---|
+| Steam Frame turns | 9.43 / 8.28 | 9.00 / 8.04 | 9.17 / 8.26 |
+| Simulator fast turns | 9.05 / 8.91 | 8.00 / 8.02 | 7.53 / 7.53 |
+
+SSIM rose on every triplet. The GPU fit reads the packed, aligned vectors,
+so a head turn is already out of what it fits. A single thread group runs
+alone on the GPU, so the fit's size is its cost: a 64x64 grid with sixteen
+sweeps took 0.6 ms a pair at 3004x3004 and measured the same as this one.
+The FG bench at 3004x3004, 2X, median: the shared feature 2.03 ms still and
+2.39 turning, a feature per eye 2.38 and 2.71, with the fit 2.52 and 2.85.
+Live in Stellar Blade on the OpenXR Simulator (3004x3004, 100%), with the
+first kernel, the camera path used 4,735 fits and dropped 697 - a loading
+screen's, with 360 inliers and translations of thousands - at 3.51 ms a
+pair against 2.32 for the shared feature, and the game went from 43.9 to
+41.6 frames a second.
 
 #### The deeper pipeline: its phase, and an automatic depth
 

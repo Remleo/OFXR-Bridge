@@ -744,6 +744,11 @@ void replay_held_out(const std::filesystem::path& directory) {
     if (extrapolate || std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY") ||
         (std::getenv("XRFG_TEST_REPLAY_FLOWS") && !std::getenv("XRFG_TEST_REPLAY_NATIVE_SCALES")))
         native_scales.clear();
+    // XRFG_TEST_REPLAY_NATIVE_GPU_FIT=1 runs the live camera-motion path: the
+    // GPU fits the camera's motion to the generating pair, and the pair is
+    // generated again with it, as the next live pair would be.
+    const bool gpu_fit = std::getenv("XRFG_TEST_REPLAY_NATIVE_GPU_FIT") != nullptr;
+    if (gpu_fit) SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_CAMERA", "1");
     for (const auto& scale_text : native_scales) {
         const char* scale = scale_text.c_str();
         SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", scale);
@@ -1113,6 +1118,30 @@ void replay_held_out(const std::filesystem::path& directory) {
             generated = native.record(list, 0, a.Get(), b.Get(), native_a, views2, seed_b.get(), moved.get(),
                                       outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
         });
+        if (gpu_fit && generated == S_OK) {
+            // The work is done; a fence signalled now says so to the native
+            // object, which reads the fit back before the next pair.
+            ComPtr<ID3D12Fence> fence;
+            require_hresult(fixture.device()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)),
+                            "replay fit fence");
+            require_hresult(fixture.queue()->Signal(fence.Get(), 1), "replay fit signal");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+            native.submitted(fence.Get(), 1);
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                generated = native.record(list, 0, a.Get(), b.Get(), native_a, views2, seed_b.get(), moved.get(),
+                                          outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+            for (UINT eye = 0; eye < 2; ++eye) {
+                if (const auto fit = native.last_camera_fit(eye)) {
+                    std::cout << "replay native gpu fit eye " << eye << ": " << fit->degrees << " degrees, translation "
+                              << fit->translation[0] << ' ' << fit->translation[1] << ' ' << fit->translation[2]
+                              << ", median residual " << fit->residual_px << " px, inliers " << fit->inliers
+                              << " of " << fit->points << '\n';
+                }
+            }
+            std::cout << "replay native gpu fits used=" << native.camera_fits_used()
+                      << " rejected=" << native.camera_fits_rejected() << '\n';
+        }
         std::cout << "replay native " << scale << "% seeded=" << seeded << " generated=" << generated
                   << " skip=" << int(native.last_skip()) << '\n';
         if (generated == S_OK)
@@ -1120,5 +1149,6 @@ void replay_held_out(const std::filesystem::path& directory) {
                   read_back_texture(fixture, output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
     }
     SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", nullptr);
+    if (gpu_fit) SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_CAMERA", nullptr);
 #endif
 }

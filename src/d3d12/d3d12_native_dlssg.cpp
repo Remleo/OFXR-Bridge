@@ -18,6 +18,7 @@
 #include <wrl/client.h>
 
 #ifdef XRFG_NATIVE_DLSSG
+#include "native_dlssg_fit_shader.hpp"
 #include "native_dlssg_pack_shader.hpp"
 #include "native_dlssg_pixel_shader.hpp"
 #include "native_dlssg_seed_shader.hpp"
@@ -38,7 +39,8 @@ using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 constexpr UINT kSlots = D3D12SwapchainHistory::kSlotCount;
 constexpr UINT kSrvs = 7;
-constexpr UINT kBlock = kSrvs + 3; // seven SRVs, three UAVs
+constexpr UINT kUavs = 4;
+constexpr UINT kBlock = kSrvs + kUavs; // seven SRVs, four UAVs
 constexpr UINT kBlocksPerEye = 4; // A, B, and two outputs
 constexpr UINT kMaxOutputs = 2;
 constexpr auto kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -81,6 +83,16 @@ constexpr UINT kMinScale = 25;
 // two differ by less than half the display range, fading towards it. Of 1/32
 // to 1, a half measured the least error at moving edges.
 constexpr float kDetailFalloff = 2.0F;
+// The camera fit (FitNativeDlssGCamera): its result's floats, the points it
+// fits, and what a fit needs to be handed on - a quarter of the points as
+// inliers, a median residual under this many eye pixels (the simulator's fast
+// turns fit to 12-15 and still gained), and a pair no more than this many
+// behind the one it is applied to.
+constexpr UINT kFitFloats = 16;
+constexpr UINT kFitPoints = 32 * 32;
+constexpr UINT kFitMinInliers = kFitPoints / 4;
+constexpr float kFitMaxResidual = 48.0F;
+constexpr std::int64_t kFitMaxBehind = 2;
 
 struct Params {
     UINT extent[2], color_slice, guide_slice;
@@ -95,13 +107,12 @@ struct Params {
     // own, synthetic_rotation taking its rays into B's (Output).
     UINT depth_inverted, synthetic_camera;
     float synthetic_rotation[4];
-    // Tests (set_test_camera_motion): the camera's own motion from B to the
-    // aligned A, a rotation (x, y, z, w) and in camera_move's xyz a
-    // translation taking B's camera space to A's, in the depth's units.
-    // camera_move's w and depth_to_z linearise a depth value d into that
-    // distance, w / (d * depth_to_z[0] + depth_to_z[1]); with w zero the
-    // vectors are written whole, otherwise less the camera's flow.
-    float camera_rotation[4], camera_move[4], depth_to_z[2];
+    // The camera's own motion from B to the aligned A, a rotation (x, y, z,
+    // w) and a translation taking B's camera space to A's, in the depth's
+    // units: the previous pair's fit, or a test's; all zero when the vectors
+    // are written whole. depth_to_z linearises a depth value d into that
+    // distance, [0] / (d * [1] + [2]).
+    float camera_rotation[4], camera_move[3], depth_to_z[3];
 };
 static_assert(sizeof(Params) == kParams * sizeof(UINT));
 // Where an eye sits in its feature, and the columns its pack writes: the eye
@@ -121,7 +132,7 @@ class Transitions {
         }
         Entry *entry = find(r);
         if (!entry) {
-            // Two eyes touch at most 28 distinct resources.
+            // Two eyes touch at most 30 distinct resources.
             if (tracked_count_ == tracked_.size()) {
                 throw std::length_error("native DLSS-G transitions");
             }
@@ -177,8 +188,8 @@ class Transitions {
         pending_[pending_count_++] = b;
     }
     ID3D12GraphicsCommandList *list_;
-    std::array<Entry, 32> tracked_{};
-    std::array<D3D12_RESOURCE_BARRIER, 32> pending_{};
+    std::array<Entry, 40> tracked_{};
+    std::array<D3D12_RESOURCE_BARRIER, 40> pending_{};
     UINT tracked_count_{}, pending_count_{};
 };
 
@@ -300,14 +311,24 @@ void matrix(float (&out)[4][4], FXMMATRIX m) {
 void depth_to_z(const DlssMotionVectorFrame &g, Params &p) {
     const float n = g.camera_near, f = g.camera_far;
     if (g.depth_infinite) {
-        p.camera_move[3] = n;
-        p.depth_to_z[0] = g.depth_inverted ? 1.0F : -1.0F;
-        p.depth_to_z[1] = g.depth_inverted ? 0.0F : 1.0F;
+        p.depth_to_z[0] = n;
+        p.depth_to_z[1] = g.depth_inverted ? 1.0F : -1.0F;
+        p.depth_to_z[2] = g.depth_inverted ? 0.0F : 1.0F;
     } else {
-        p.camera_move[3] = n * f;
-        p.depth_to_z[0] = g.depth_inverted ? f - n : n - f;
-        p.depth_to_z[1] = g.depth_inverted ? n : f;
+        p.depth_to_z[0] = n * f;
+        p.depth_to_z[1] = g.depth_inverted ? f - n : n - f;
+        p.depth_to_z[2] = g.depth_inverted ? n : f;
     }
+}
+// A rigid motion taking B's camera space to the aligned A's, as a rotation
+// (x, y, z, w) and translation, as the clip-space transform NGX takes: B's
+// projection in, the motion, and the projection out again.
+XMMATRIX clip_to_previous(const std::array<float, 7> &rigid, const D3D12FieldOfView &fov,
+                          const DlssMotionVectorFrame &g) {
+    const auto p = projection(fov, g);
+    const auto motion = XMMatrixRotationQuaternion(XMVectorSet(rigid[0], rigid[1], rigid[2], rigid[3])) *
+                        XMMatrixTranslation(rigid[4], rigid[5], rigid[6]);
+    return XMMatrixInverse(nullptr, p) * motion * p;
 }
 std::filesystem::path module_directory() {
     HMODULE m{};
@@ -519,6 +540,32 @@ struct D3D12NativeDlssG::Impl {
     bool vectors_dilated{};
     std::array<std::optional<XMFLOAT4X4>, 2> test_motion{};
     std::array<std::optional<std::array<float, 7>>, 2> test_rigid{};
+    // The camera's own motion the GPU fitted to a pair (FitNativeDlssGCamera),
+    // kept for the next pair of the same stream: what the pack takes out of
+    // the vectors and the evaluation hands NGX as matrices (fitted).
+    struct CameraMotion {
+        std::array<float, 7> rigid{};
+        std::uint64_t stream{}, epoch{}, serial{};
+        CameraFit report{};
+    };
+    std::array<std::optional<CameraMotion>, 2> fitted{};
+    // The motion each eye's pack took out this pair, for its evaluation.
+    std::array<std::optional<std::array<float, 7>>, 2> pair_rigid{};
+    // A fit's result on its way back: a buffer per eye the fit writes, one
+    // staging buffer both are copied into, and the fence of the submission.
+    struct FitReadback {
+        std::array<ComPtr<ID3D12Resource>, 2> buffer;
+        ComPtr<ID3D12Resource> staging;
+        ComPtr<ID3D12Fence> fence;
+        std::uint64_t value{};
+        UINT eyes{};
+        std::array<std::uint64_t, 2> stream{}, epoch{}, serial{};
+    };
+    std::array<FitReadback, kSlots> fits;
+    UINT fit_slot{kSlots};
+    bool camera_motion{};
+    ComPtr<ID3D12PipelineState> fit;
+    std::uint64_t fits_used{}, fits_rejected{};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
@@ -545,6 +592,62 @@ struct D3D12NativeDlssG::Impl {
         if (test_output) {
             std::fputs(message, stderr);
         }
+    }
+    // Fits whose submissions completed: each eye's goes to camera[eye] when
+    // it is good enough to hand on, else it is dropped.
+    void poll_fits() noexcept {
+        try {
+            for (auto &readback : fits) {
+                if (!readback.fence || !readback.value ||
+                    readback.fence->GetCompletedValue() < readback.value) continue;
+                const D3D12_RANGE range{0, 2 * kFitFloats * sizeof(float)};
+                void *mapped{};
+                if (SUCCEEDED(readback.staging->Map(0, &range, &mapped))) {
+                    for (UINT eye = 0; eye < readback.eyes && eye < 2; ++eye) {
+                        const float *f = static_cast<const float *>(mapped) + eye * kFitFloats;
+                        const float angle = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+                        bool finite = true;
+                        for (UINT i = 0; i < 11; ++i) finite = finite && std::isfinite(f[i]);
+                        const bool good = finite && f[9] == 1.0F && f[6] >= float(kFitMinInliers) &&
+                                          f[8] <= kFitMaxResidual && angle < 1.0F;
+                        if (decision_log) {
+                            std::fprintf(decision_log,
+                                "%llu fit eye=%u serial=%llu degrees=%.3f translation=%.3f,%.3f,%.3f "
+                                "residual=%.2f inliers=%.0f points=%.0f %s\n",
+                                GetTickCount64(), eye, readback.serial[eye], angle * 57.29578F,
+                                f[3], f[4], f[5], f[8], f[6], f[7], good ? "used" : "dropped");
+                        }
+                        if (!good) {
+                            ++fits_rejected;
+                            continue;
+                        }
+                        const float s = angle > 1e-9F ? std::sin(angle / 2) / angle : 0.5F;
+                        CameraMotion motion{};
+                        motion.rigid = {f[0] * s, f[1] * s, f[2] * s, std::cos(angle / 2), f[3], f[4], f[5]};
+                        motion.stream = readback.stream[eye];
+                        motion.epoch = readback.epoch[eye];
+                        motion.serial = readback.serial[eye];
+                        motion.report = {angle * 57.29578F, {f[3], f[4], f[5]}, f[8], UINT(f[6]), UINT(f[7])};
+                        fitted[eye] = motion;
+                        ++fits_used;
+                    }
+                    const D3D12_RANGE no_write{0, 0};
+                    readback.staging->Unmap(0, &no_write);
+                }
+                readback.value = 0;
+                readback.fence.Reset();
+            }
+        } catch (...) {}
+    }
+    // The fit for a pair whose A is the frame given, if one is recent enough:
+    // the pair before, or at most kFitMaxBehind pairs back.
+    std::optional<std::array<float, 7>> fitted_motion(UINT eye, const DlssMotionVectorFrame &ga) const noexcept {
+        if (eye >= fitted.size() || !fitted[eye]) return std::nullopt;
+        const auto &m = *fitted[eye];
+        if (m.stream != ga.stream || m.epoch != ga.epoch) return std::nullopt;
+        const auto behind = std::int64_t(ga.serial) - std::int64_t(m.serial);
+        if (behind > kFitMaxBehind || behind < -kFitMaxBehind) return std::nullopt;
+        return m.rigid;
     }
     void poll_decisions() noexcept {
         try {
@@ -587,6 +690,24 @@ struct D3D12NativeDlssG::Impl {
         if (acquired) {
             release_ngx(device.Get());
         }
+    }
+    HRESULT buffer(UINT bytes, D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state,
+                   D3D12_RESOURCE_FLAGS flags, ComPtr<ID3D12Resource> &out) {
+        D3D12_RESOURCE_DESC d{};
+        d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        d.Width = bytes;
+        d.Height = 1;
+        d.DepthOrArraySize = 1;
+        d.MipLevels = 1;
+        d.SampleDesc.Count = 1;
+        d.Format = DXGI_FORMAT_UNKNOWN;
+        d.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        d.Flags = flags;
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = heap;
+        hp.CreationNodeMask = hp.VisibleNodeMask = 1;
+        return device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr,
+                                               IID_PPV_ARGS(&out));
     }
     HRESULT texture(DXGI_FORMAT format, ComPtr<ID3D12Resource> &out, bool buffer, UINT width,
                     UINT height) {
@@ -679,7 +800,7 @@ struct D3D12NativeDlssG::Impl {
     HRESULT pipelines() {
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
         ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvs, 0, 0, 0};
-        ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0};
+        ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kUavs, 0, 0, 0};
         D3D12_ROOT_PARAMETER rp[3]{};
         for (UINT i = 0; i < 2; ++i) {
             rp[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -709,6 +830,11 @@ struct D3D12NativeDlssG::Impl {
         }
         cs.CS = {g_xrfg_native_dlssg_seed_shader, sizeof(g_xrfg_native_dlssg_seed_shader)};
         hr = device->CreateComputePipelineState(&cs, IID_PPV_ARGS(&seed));
+        if (FAILED(hr)) {
+            return hr;
+        }
+        cs.CS = {g_xrfg_native_dlssg_fit_shader, sizeof(g_xrfg_native_dlssg_fit_shader)};
+        hr = device->CreateComputePipelineState(&cs, IID_PPV_ARGS(&fit));
         if (FAILED(hr)) {
             return hr;
         }
@@ -755,13 +881,14 @@ struct D3D12NativeDlssG::Impl {
     // A work slot is reused only after its previous submission completed, so
     // a block can be rewritten here; one that still matches is left alone.
     void descriptors(UINT slot, UINT base, Feature &f, ID3D12Resource *color,
-                     const DlssMotionVectorFrame &g, UINT output, ID3D12Resource *fallback) {
+                     const DlssMotionVectorFrame &g, UINT output, ID3D12Resource *fallback,
+                     ID3D12Resource *fit_buffer = nullptr) {
         // The feature's packed colour is both read, by a reduced-resolution
         // compose, and written, by the pack.
         const std::array<ID3D12Resource *, kBlock> resources{
             color, g.motion_vectors.Get(), g.depth.Get(), f.generated[output].Get(),
             f.disable[output].Get(), fallback, f.color.Get(), f.color.Get(), f.motion.Get(),
-            f.depth.Get()};
+            f.depth.Get(), fit_buffer};
         const std::array<DXGI_FORMAT, 3> formats{view_format,
                                                  motion_format(g.motion_vectors->GetDesc().Format),
                                                  depth_format(g.depth->GetDesc().Format)};
@@ -793,6 +920,12 @@ struct D3D12NativeDlssG::Impl {
             device->CreateUnorderedAccessView(resources[kSrvs + i], nullptr, &u,
                                               cpu(slot, base + kSrvs + i));
         }
+        // The fit's result, or a null view where the block has none.
+        D3D12_UNORDERED_ACCESS_VIEW_DESC fb{};
+        fb.Format = DXGI_FORMAT_R32_FLOAT;
+        fb.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        fb.Buffer.NumElements = kFitFloats;
+        device->CreateUnorderedAccessView(fit_buffer, nullptr, &fb, cpu(slot, base + kSrvs + 3));
         for (UINT i = 0; i < kBlock; ++i) {
             written.resources[i] = resources[i];
         }
@@ -865,8 +998,9 @@ struct D3D12NativeDlssG::Impl {
     // A seed writes only the aligned colour and reads no guides.
     void pack_input(ID3D12GraphicsCommandList *list, Transitions &t, UINT slot, UINT base,
                     Feature &f, ID3D12Resource *color, const DlssMotionVectorFrame &g,
-                    const Params &p, ID3D12Resource *fallback, bool seeding = false) {
-        descriptors(slot, base, f, color, g, 0, fallback);
+                    const Params &p, ID3D12Resource *fallback, bool seeding = false,
+                    ID3D12Resource *fit_buffer = nullptr) {
+        descriptors(slot, base, f, color, g, 0, fallback, fit_buffer);
         if (!seeding) {
             t.to(g.motion_vectors.Get(), g.resource_state, kRead);
             t.to(g.depth.Get(), g.depth_resource_state, kRead);
@@ -881,6 +1015,25 @@ struct D3D12NativeDlssG::Impl {
         list->SetComputeRoot32BitConstants(2, kParams, &p, 0);
         const UINT width = seeding ? kSeedGroupWidth : 8;
         list->Dispatch((p.cell_width + width - 1) / width, (p.cell_height + 7) / 8, 1);
+    }
+    // Fits the camera's motion to the eye's vectors just packed, after
+    // pack_input for the same block, and copies the result out for the CPU.
+    void fit_camera(ID3D12GraphicsCommandList *list, Transitions &t, UINT slot, UINT base,
+                    Feature &f, const Params &p, FitReadback &readback, UINT eye) {
+        t.uav(f.motion.Get());
+        t.uav(f.depth.Get());
+        t.flush();
+        list->SetPipelineState(fit.Get());
+        list->SetComputeRootDescriptorTable(0, gpu(slot, base));
+        list->SetComputeRootDescriptorTable(1, gpu(slot, base + kSrvs));
+        list->SetComputeRoot32BitConstants(2, kParams, &p, 0);
+        list->Dispatch(1, 1, 1);
+        auto *result = readback.buffer[eye].Get();
+        t.to(result, kWrite, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        t.flush();
+        list->CopyBufferRegion(readback.staging.Get(), eye * kFitFloats * sizeof(float), result, 0,
+                               kFitFloats * sizeof(float));
+        t.to(result, kWrite, kWrite);
     }
     // One evaluation covers every eye of the feature. The camera describes
     // the first of them; motion carries everything else.
@@ -906,8 +1059,13 @@ struct D3D12NativeDlssG::Impl {
         matrix(o.clipToLensClip, XMMatrixIdentity());
         matrix(o.clipToPrevClip, XMMatrixIdentity());
         matrix(o.prevClipToClip, XMMatrixIdentity());
-        if (!reset && eye < test_motion.size() && test_motion[eye]) {
-            const XMMATRIX motion = XMLoadFloat4x4(&*test_motion[eye]);
+        // The camera's motion this pair's pack took out of the vectors: a
+        // test's matrix if it gave one, else from the motion itself.
+        const bool object_motion = !reset && eye < pair_rigid.size() && pair_rigid[eye].has_value();
+        if (object_motion) {
+            const XMMATRIX motion = eye < test_motion.size() && test_motion[eye]
+                ? XMLoadFloat4x4(&*test_motion[eye])
+                : clip_to_previous(*pair_rigid[eye], b.fov, gb);
             matrix(o.clipToPrevClip, motion);
             matrix(o.prevClipToClip, XMMatrixInverse(nullptr, motion));
         }
@@ -933,9 +1091,9 @@ struct D3D12NativeDlssG::Impl {
         o.cameraFOV = b.fov.angle_up - b.fov.angle_down;
         o.cameraAspectRatio = float(p.extent[0]) / p.extent[1];
         o.depthInverted = gb.depth_inverted;
-        // With a test camera motion the pack has taken the camera's own flow
-        // out of the vectors, and NGX is told so.
-        o.cameraMotionIncluded = reset || eye >= test_rigid.size() || !test_rigid[eye];
+        // With a camera motion the pack has taken the camera's own flow out
+        // of the vectors, and NGX is told so.
+        o.cameraMotionIncluded = !object_motion;
         o.motionVectorsDilated = vectors_dilated; // false: NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
@@ -983,7 +1141,7 @@ D3D12NativeDlssG::~D3D12NativeDlssG() = default;
 
 HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
                                      const D3D12_RESOURCE_DESC &source,
-                                     DXGI_FORMAT format, UINT scale) noexcept {
+                                     DXGI_FORMAT format, UINT scale, bool camera) noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     try {
         auto p = std::make_unique<Impl>();
@@ -1004,7 +1162,10 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->test_output = environment(L"XRFG_TEST_NATIVE_DLSSG");
         // Measures a turning head's cost in a game while the head is still.
         p->reseed_every_pair = environment(L"XRFG_TEST_NATIVE_DLSSG_RESEED_EVERY_PAIR");
-        p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE");
+        // One NGX evaluation has one clip space, so the camera's motion needs
+        // a feature per eye.
+        p->camera_motion = environment(L"XRFG_NATIVE_DLSSG_CAMERA", camera ? 1U : 0U) != 0;
+        p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE") && !p->camera_motion;
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         p->scale = std::clamp(environment(L"XRFG_NATIVE_DLSSG_SCALE", scale), kMinScale, 100U);
         p->detail_falloff = float(environment(L"XRFG_NATIVE_DLSSG_DETAIL", UINT(kDetailFalloff)));
@@ -1046,6 +1207,18 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
             if (FAILED(hr)) {
                 return hr;
             }
+            if (p->camera_motion) {
+                auto &readback = p->fits[slot];
+                for (auto &b : readback.buffer) {
+                    hr = p->buffer(kFitFloats * sizeof(float), D3D12_HEAP_TYPE_DEFAULT, kWrite,
+                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, b);
+                    if (FAILED(hr)) return hr;
+                }
+                hr = p->buffer(2 * kFitFloats * sizeof(float), D3D12_HEAP_TYPE_READBACK,
+                               D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_FLAG_NONE,
+                               readback.staging);
+                if (FAILED(hr)) return hr;
+            }
             if (p->diagnostic_decisions) {
                 D3D12_HEAP_PROPERTIES hp{};
                 hp.Type = D3D12_HEAP_TYPE_READBACK;
@@ -1073,6 +1246,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
     (void)source;
     (void)format;
     (void)scale;
+    (void)camera;
     return DXGI_ERROR_UNSUPPORTED;
 #endif
 }
@@ -1096,6 +1270,12 @@ void D3D12NativeDlssG::submitted(ID3D12Fence *fence, std::uint64_t value) noexce
             readback.value = value;
             impl_->recorded_slot = kSlots;
         }
+        if (impl_->fit_slot < kSlots) {
+            auto &readback = impl_->fits[impl_->fit_slot];
+            readback.fence = fence;
+            readback.value = value;
+            impl_->fit_slot = kSlots;
+        }
     }
 #else
     (void)fence;
@@ -1112,6 +1292,29 @@ D3D12NativeDlssG::Skip D3D12NativeDlssG::last_skip() const noexcept {
 std::uint64_t D3D12NativeDlssG::reseeds() const noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     return impl_ ? impl_->reseeds : 0;
+#else
+    return 0;
+#endif
+}
+std::optional<D3D12NativeDlssG::CameraFit> D3D12NativeDlssG::last_camera_fit(UINT eye) const noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    if (!impl_ || eye >= impl_->fitted.size() || !impl_->fitted[eye]) return std::nullopt;
+    return impl_->fitted[eye]->report;
+#else
+    (void)eye;
+    return std::nullopt;
+#endif
+}
+std::uint64_t D3D12NativeDlssG::camera_fits_used() const noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    return impl_ ? impl_->fits_used : 0;
+#else
+    return 0;
+#endif
+}
+std::uint64_t D3D12NativeDlssG::camera_fits_rejected() const noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    return impl_ ? impl_->fits_rejected : 0;
 #else
     return 0;
 #endif
@@ -1165,6 +1368,8 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         auto &p = *impl_;
         p.skip = Skip::none;
         if (p.diagnostic_decisions) p.poll_decisions();
+        if (p.camera_motion) p.poll_fits();
+        p.pair_rigid = {};
         const auto skip = [&](Skip reason) {
             reset();
             p.skip = reason;
@@ -1382,11 +1587,19 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 auto &params = eye_params[i];
                 params = p.parameters(bv[i], gb, i, UINT(bv.size()));
                 set_mapping(params, i);
+                depth_to_z(gb, params);
+                // The camera's motion to take out of this eye's vectors: a
+                // test's, else the fit of the pair before.
+                std::optional<std::array<float, 7>> rigid;
                 if (i < p.test_rigid.size() && p.test_rigid[i]) {
-                    const auto &rigid = *p.test_rigid[i];
-                    std::copy(rigid.begin(), rigid.begin() + 4, params.camera_rotation);
-                    std::copy(rigid.begin() + 4, rigid.end(), params.camera_move);
-                    depth_to_z(gb, params);
+                    rigid = *p.test_rigid[i];
+                } else if (p.camera_motion && !shared) {
+                    rigid = p.fitted_motion(i, ga);
+                }
+                if (rigid) {
+                    std::copy(rigid->begin(), rigid->begin() + 4, params.camera_rotation);
+                    std::copy(rigid->begin() + 4, rigid->end(), params.camera_move);
+                    p.pair_rigid[i] = rigid;
                 }
                 const auto &e = p.eyes[i];
                 reseed = reseed || e.serial != ga.serial || e.stream != ga.stream ||
@@ -1428,8 +1641,21 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             }
             p.begin_pack(t, feature);
             for (UINT i = first; i <= last; ++i) {
-                p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock + kBlock, feature, b,
-                             *bg->eyes[guide_index(i)], eye_params[i], b);
+                const UINT base = i * kBlocksPerEye * kBlock + kBlock;
+                auto &readback = p.fits[slot];
+                auto *fit_buffer = p.camera_motion && !shared && i < 2 ? readback.buffer[i].Get() : nullptr;
+                p.pack_input(list, t, slot, base, feature, b, *bg->eyes[guide_index(i)], eye_params[i], b,
+                             false, fit_buffer);
+                // The camera's motion of this pair, for the next one.
+                if (fit_buffer) {
+                    const auto &gb = *bg->eyes[guide_index(i)];
+                    p.fit_camera(list, t, slot, base, feature, eye_params[i], readback, i);
+                    readback.stream[i] = gb.stream;
+                    readback.epoch[i] = gb.epoch;
+                    readback.serial[i] = gb.serial;
+                    readback.eyes = std::max(readback.eyes, i + 1);
+                    p.fit_slot = slot;
+                }
             }
             p.end_pack(t, feature);
             for (UINT output = 0; output < outputs.size(); ++output) {
