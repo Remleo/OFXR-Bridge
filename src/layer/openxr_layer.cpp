@@ -712,6 +712,8 @@ struct PendingApplicationFrame {
 };
 
 enum class GenerationQuarantineReason : std::int64_t {
+    // Retired in V443: creating a swapchain no longer quarantines; see
+    // layer_create_swapchain_impl. Kept so the flight-log value stays unique.
     swapchain_created = 1,
     swapchain_destroyed = 2,
     d3d11_images_changed = 3,
