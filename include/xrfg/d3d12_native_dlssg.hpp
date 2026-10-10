@@ -50,11 +50,21 @@ class D3D12NativeDlssG final {
     [[nodiscard]] Skip last_skip() const noexcept;
     // Eye evaluations that reseeded NGX's history with the aligned previous frame.
     [[nodiscard]] std::uint64_t reseeds() const noexcept;
+    // Native pairs whose NGX history was reset and reseeded with the aligned
+    // previous frame: under a head turn every pair, with a still head only
+    // where the guides' sequence broke.
+    [[nodiscard]] std::uint64_t reseeded_pairs() const noexcept;
     // Tests: an eye's camera motion between the two frames, handed to NGX in
     // place of none - the clip-space transform taking B's camera to A's, as
     // sixteen floats in DirectXMath's row-vector, row-major order. nullptr
     // clears it. Applies to a feature's first eye, so one eye per feature.
-    void set_test_camera_motion(UINT eye, const float *clip_to_previous) noexcept;
+    // rigid, given, is the same motion as a rotation (x, y, z, w) and a
+    // translation (x, y, z) taking B's camera space to the aligned A's, in
+    // the depth's units: the pack then takes the camera's own flow out of
+    // the vectors and NGX is told they carry object motion alone, as its
+    // contract has it, and adds the camera's back from the matrices.
+    void set_test_camera_motion(UINT eye, const float *clip_to_previous,
+                                const float *rigid = nullptr) noexcept;
 
   private:
     struct Impl;

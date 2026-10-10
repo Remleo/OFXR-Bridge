@@ -915,6 +915,17 @@ void replay_held_out(const std::filesystem::path& directory) {
         // Gauss-Newton on the reprojection error, keeping the closest 70% of
         // the points (the scene, not what moves with the camera) after the
         // first passes. One eye per feature: run with XRFG_NATIVE_DLSSG_PER_EYE=1.
+        // XRFG_TEST_REPLAY_NATIVE_OBJECT_MOTION=1 also takes the camera's own
+        // flow out of the vectors, so NGX gets object motion alone and the
+        // camera's from the matrices, as its contract has it. The fit applies
+        // to the generating pair alone: the seeding pair has one frame on
+        // both sides.
+        struct CameraFit {
+            DirectX::XMFLOAT4X4 clip{};
+            std::optional<std::array<float, 7>> rigid;
+        };
+        std::array<std::optional<CameraFit>, 2> camera_fits{};
+        const bool object_motion = std::getenv("XRFG_TEST_REPLAY_NATIVE_OBJECT_MOTION") != nullptr;
         if (std::getenv("XRFG_TEST_REPLAY_NATIVE_CAMERA_FIT")) {
             const auto half_to_float = [](std::uint16_t h) {
                 const int exponent = (h >> 10) & 31, mantissa = h & 1023;
@@ -1069,11 +1080,19 @@ void replay_held_out(const std::filesystem::path& directory) {
                     DirectX::XMMatrixInverse(nullptr, projection) * motion_m * projection;
                 DirectX::XMFLOAT4X4 stored;
                 DirectX::XMStoreFloat4x4(&stored, clip_to_previous);
-                native.set_test_camera_motion(UINT(e), &stored.m[0][0]);
-                const double angle = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]) * 57.29578;
+                CameraFit& fit = camera_fits[e].emplace();
+                fit.clip = stored;
+                const double angle_radians = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+                if (object_motion) {
+                    const double s = angle_radians > 1e-12 ? std::sin(angle_radians / 2) / angle_radians : 0.5;
+                    fit.rigid = {{float(x[0] * s), float(x[1] * s), float(x[2] * s),
+                                  float(std::cos(angle_radians / 2)), float(x[3]), float(x[4]), float(x[5])}};
+                }
+                const double angle = angle_radians * 57.29578;
                 std::cout << "replay native camera fit eye " << e << ": " << angle << " degrees, translation "
                           << x[3] << ' ' << x[4] << ' ' << x[5] << ", median inlier residual "
-                          << inlier[inlier.size() / 2] << " px over " << points.size() << " points\n";
+                          << inlier[inlier.size() / 2] << " px over " << points.size() << " points"
+                          << (object_motion ? ", object motion alone" : "") << '\n';
             }
         }
         auto seed_a = make_guides(f0, 1, 1.0F, nullptr);
@@ -1084,6 +1103,12 @@ void replay_held_out(const std::filesystem::path& directory) {
             seeded = native.record(list, 0, a.Get(), a.Get(), native_a, native_a, seed_a.get(), seed_b.get(),
                                    outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
         });
+        for (std::size_t e = 0; e < camera_fits.size(); ++e) {
+            if (camera_fits[e]) {
+                native.set_test_camera_motion(UINT(e), &camera_fits[e]->clip.m[0][0],
+                                              camera_fits[e]->rigid ? camera_fits[e]->rigid->data() : nullptr);
+            }
+        }
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
             generated = native.record(list, 0, a.Get(), b.Get(), native_a, views2, seed_b.get(), moved.get(),
                                       outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);

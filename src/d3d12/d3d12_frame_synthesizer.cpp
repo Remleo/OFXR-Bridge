@@ -2567,6 +2567,10 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    [[nodiscard]] std::uint64_t native_reseeded_pairs() const noexcept {
+        return native_dlss ? native_dlss->reseeded_pairs() : 0;
+    }
+
     [[nodiscard]] HRESULT consume_nvidia_gpu_timing(
         D3D12NvidiaGpuTiming* output_timing) noexcept {
         if (output_timing == nullptr) {
@@ -5659,6 +5663,15 @@ HRESULT D3D12FrameSynthesizer::wait_for_previous_submission(
             : impl_->wait_for_previous_submission(timeout_milliseconds);
     } catch (...) {
         return E_FAIL;
+    }
+}
+
+std::uint64_t D3D12FrameSynthesizer::native_reseeded_pairs() noexcept {
+    try {
+        std::scoped_lock lock(mutex_);
+        return impl_ ? impl_->native_reseeded_pairs() : 0;
+    } catch (...) {
+        return 0;
     }
 }
 

@@ -1188,6 +1188,40 @@ frame rate on the simulator (45 a second either way at 3004x3004 an eye).
 NGX's near/far partition of 50 or 150 moved separation 40 to 12.41 or 13.20
 and changed nothing at 1000; a seam of 128 changed nothing.
 
+The matrices alone are ignored, but NGX does take the camera's motion when
+the vectors are made to leave it out, which is its contract: camera motion
+not included, the clip-to-previous matrices describing it, and vectors that
+carry what moves on its own. `XRFG_TEST_REPLAY_NATIVE_OBJECT_MOTION=1` (with
+`XRFG_TEST_REPLAY_NATIVE_CAMERA_FIT=1` and `XRFG_NATIVE_DLSSG_PER_EYE=1`)
+hands the pack the fitted motion as well (`set_test_camera_motion`'s
+`rigid`): for each guide texel it unprojects the depth into B's camera,
+moves it by the fit, projects it again and takes that from the vector, and
+the evaluation says the vectors hold object motion alone. The fit applies to
+the generating pair only; the seeding pair, with one frame on both sides,
+keeps none. Error where the scene moved, native at 67% and at 100%:
+
+| Set | Base | Object motion |
+|---|---|---|
+| Steam Frame turns (six triplets, 2.5 degrees a pair, fit 0.6 px) | 9.43 / 8.28 | 9.17 / 8.26 |
+| Simulator fast turns (six triplets, 4.4-4.8 degrees a pair, fit 12-15 px) | 9.05 / 8.91 | 7.53 / 7.53 |
+
+SSIM rose on every fast triplet (0.66 to 0.70 at 67%). At NVIDIA's
+separation of 40 with object motion the fast set measured 7.68 and the Steam
+Frame set 9.27: once NGX knows the camera moved, its own separation no longer
+smears her, though 1000 still measures better. The matrices alone
+(`CAMERA_FIT` without `OBJECT_MOTION`) measured as the base, 9.41, and a
+feature per eye as the shared one. Aligning A by the whole fitted turn
+instead (`XRFG_TEST_REPLAY_NATIVE_GAME_ROTATION=1`) at separation 1000
+measured 9.37 on the Steam Frame set, with higher SSIM on the slow triplets
+(0.77 against 0.71 on one). A capture taken live on the OpenXR Simulator
+(3004x3004 an eye, 44 game frames a second, the camera still) replayed the
+same with and without, 11.39 at 67% and 9.96 at 100%, and its live generated
+frames sat midway: each as far from the frame before as from the frame
+after, 11 against 21 between the two. Live, object motion needs a feature
+per eye (one clip space per evaluation, 11-28% more GPU) and the camera's
+motion a frame late, from a fit on the GPU or from UEVR's view callback; it
+is not built.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:
@@ -1664,6 +1698,14 @@ per layer of the code, and only the last one touches the game.
   shows each real frame a display period later, two at 3X, the deep pipeline
   one more, extrapolation none) plus the promise correction
   (`observe_promise_lateness`), not a measurement.
+- The Guides line's reset share and the Pace line come from what the layer
+  already counts: `D3D12NativeDlssG::reseeded_pairs`, through
+  `D3D12FrameSynthesizer::native_reseeded_pairs` and summed over the eyes'
+  synthesizers at each repaint, and the rates. Pace is a line of its own
+  rather than a reason, since a short game is no fallback: it shows when the
+  game's rate is under nine tenths of the refresh rate divided by the frames
+  a game frame makes (Stellar Blade at 37 a second on a 120 Hz Steam Frame at
+  2X, where one submission in six was a repeat), and names what to try.
 - The pixels are font8x8's public-domain glyphs (`THIRD_PARTY.md`), grown by
   Scale2x to 16 and 32 pixels once per process, on a 1024-wide texture with a
   rounded, bordered background. Premultiplied alpha, like the counter's;

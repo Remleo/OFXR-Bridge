@@ -325,6 +325,11 @@ public:
     [[nodiscard]] HRESULT consume_nvidia_gpu_timing(
         D3D12NvidiaGpuTiming* timing) noexcept;
 
+    // Native DLSS FG pairs whose NGX history was reset and reseeded with the
+    // aligned previous frame, since this synthesizer was made; zero for
+    // OFXR's own methods.
+    [[nodiscard]] std::uint64_t native_reseeded_pairs() noexcept;
+
     // Makes another queue wait on this ticket's completion before its own
     // later work runs. Required when the synthesizer owns a queue of its own
     // and writes into swapchain images: an OpenXR D3D12 runtime synchronizes

@@ -434,6 +434,11 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
                 static_cast<double>(vectors.used + refused);
             line.text = "used on " + format("%.0f", share * 100.0) + "% of pairs";
             if (refused > 0) line.text += ", " + std::to_string(refused) + " refused";
+            if (set.native && vectors.native_resets > 0) {
+                const double reset = std::min(1.0, static_cast<double>(vectors.native_resets) /
+                                                       static_cast<double>(vectors.used));
+                line.text += ", NGX reset on " + format("%.0f", reset * 100.0) + "%";
+            }
             line.tone = share >= 0.9 ? PanelTone::good : PanelTone::warn;
         } else {
             line.text = vector_status_text(vectors);
@@ -488,6 +493,23 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
             frames += ", headset got " + format("%.1f/s", input.rates.delivered);
         }
         lines.push_back({"Frames", std::move(frames), PanelTone::normal});
+    }
+    // A game short of what the frames need: each real frame then shows for
+    // an uneven number of refreshes, which reads as judder or doubling
+    // whatever the generated frames look like. Not a fallback, so it is a
+    // line of its own rather than a reason.
+    if (input.rates.generating && input.rates.refresh_hz > 0.0F && input.rates.game > 0.0F &&
+        running.frames >= 2) {
+        const float needed = input.rates.refresh_hz / static_cast<float>(running.frames);
+        if (input.rates.game < needed * 0.9F) {
+            const bool triple = running.frames == 2 && !(running.native && input.native_single_frame);
+            lines.push_back({"Pace",
+                             "game " + whole(input.rates.game) + "/s is under the " + whole(needed) +
+                                 " that " + std::to_string(running.frames) + "X needs at " +
+                                 whole(input.rates.refresh_hz) + " Hz, so frames repeat: try " +
+                                 (triple ? "3X or a lower refresh rate" : "a lower refresh rate"),
+                             PanelTone::warn});
+        }
     }
     {
         std::string session = graphics_text(input.graphics);

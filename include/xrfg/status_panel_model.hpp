@@ -137,6 +137,10 @@ struct PanelVectors {
     std::uint64_t used{};
     std::uint64_t temporal_rejections{};
     std::uint64_t invalid_rejections{};
+    // Native pairs whose NGX history was reset and reseeded with the aligned
+    // previous frame this window: the head moved, or the guides' sequence
+    // broke. Every pair under a head turn, and the frame is the softer for it.
+    std::uint64_t native_resets{};
 };
 
 struct PanelRates {

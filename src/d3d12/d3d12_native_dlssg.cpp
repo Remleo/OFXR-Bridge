@@ -70,7 +70,7 @@ constexpr UINT kSeam = 64;
 constexpr UINT kMaxFeatureSize = 8192;
 constexpr UINT kMinSeam = 16;
 // Root constants per dispatch or draw.
-constexpr UINT kParams = 52;
+constexpr UINT kParams = 62;
 // The motion and depth rectangle a reset evaluation reads.
 constexpr UINT kResetGuideSize = 64;
 // SeedNativeDlssG's group width; its groups are 8 high, like the pack's.
@@ -95,6 +95,13 @@ struct Params {
     // own, synthetic_rotation taking its rays into B's (Output).
     UINT depth_inverted, synthetic_camera;
     float synthetic_rotation[4];
+    // Tests (set_test_camera_motion): the camera's own motion from B to the
+    // aligned A, a rotation (x, y, z, w) and in camera_move's xyz a
+    // translation taking B's camera space to A's, in the depth's units.
+    // camera_move's w and depth_to_z linearise a depth value d into that
+    // distance, w / (d * depth_to_z[0] + depth_to_z[1]); with w zero the
+    // vectors are written whole, otherwise less the camera's flow.
+    float camera_rotation[4], camera_move[4], depth_to_z[2];
 };
 static_assert(sizeof(Params) == kParams * sizeof(UINT));
 // Where an eye sits in its feature, and the columns its pack writes: the eye
@@ -286,6 +293,21 @@ XMMATRIX camera(const Pose &p) {
 }
 void matrix(float (&out)[4][4], FXMMATRIX m) {
     XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4 *>(out), m);
+}
+// The linearisation of a depth value d into the distance along the view,
+// z = a / (d * b + c), from the guide's planes and conventions as
+// projection() has them: camera_move's w takes a, depth_to_z b and c.
+void depth_to_z(const DlssMotionVectorFrame &g, Params &p) {
+    const float n = g.camera_near, f = g.camera_far;
+    if (g.depth_infinite) {
+        p.camera_move[3] = n;
+        p.depth_to_z[0] = g.depth_inverted ? 1.0F : -1.0F;
+        p.depth_to_z[1] = g.depth_inverted ? 0.0F : 1.0F;
+    } else {
+        p.camera_move[3] = n * f;
+        p.depth_to_z[0] = g.depth_inverted ? f - n : n - f;
+        p.depth_to_z[1] = g.depth_inverted ? n : f;
+    }
 }
 std::filesystem::path module_directory() {
     HMODULE m{};
@@ -496,6 +518,7 @@ struct D3D12NativeDlssG::Impl {
     float depth_scale{0.1F}, near_far_partition{600.0F}, object_separation{1000.0F};
     bool vectors_dilated{};
     std::array<std::optional<XMFLOAT4X4>, 2> test_motion{};
+    std::array<std::optional<std::array<float, 7>>, 2> test_rigid{};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
@@ -508,7 +531,7 @@ struct D3D12NativeDlssG::Impl {
     FILE *decision_log{};
     Skip skip{Skip::none};
     UINT create_retry{};
-    std::uint64_t reseeds{}, failures{};
+    std::uint64_t reseeds{}, reseeded_pairs{}, failures{};
     void report(const char *what, unsigned code) noexcept {
         // The first failures and then one in 300: a persistent NGX rejection
         // must not flood the debugger once per pair.
@@ -910,7 +933,9 @@ struct D3D12NativeDlssG::Impl {
         o.cameraFOV = b.fov.angle_up - b.fov.angle_down;
         o.cameraAspectRatio = float(p.extent[0]) / p.extent[1];
         o.depthInverted = gb.depth_inverted;
-        o.cameraMotionIncluded = true;
+        // With a test camera motion the pack has taken the camera's own flow
+        // out of the vectors, and NGX is told so.
+        o.cameraMotionIncluded = reset || eye >= test_rigid.size() || !test_rigid[eye];
         o.motionVectorsDilated = vectors_dilated; // false: NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
@@ -1091,7 +1116,15 @@ std::uint64_t D3D12NativeDlssG::reseeds() const noexcept {
     return 0;
 #endif
 }
-void D3D12NativeDlssG::set_test_camera_motion(UINT eye, const float *clip_to_previous) noexcept {
+std::uint64_t D3D12NativeDlssG::reseeded_pairs() const noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    return impl_ ? impl_->reseeded_pairs : 0;
+#else
+    return 0;
+#endif
+}
+void D3D12NativeDlssG::set_test_camera_motion(UINT eye, const float *clip_to_previous,
+                                              const float *rigid) noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     if (!impl_ || eye >= impl_->test_motion.size()) {
         return;
@@ -1103,9 +1136,17 @@ void D3D12NativeDlssG::set_test_camera_motion(UINT eye, const float *clip_to_pre
     } else {
         impl_->test_motion[eye].reset();
     }
+    if (clip_to_previous && rigid) {
+        std::array<float, 7> r{};
+        std::memcpy(r.data(), rigid, sizeof(r));
+        impl_->test_rigid[eye] = r;
+    } else {
+        impl_->test_rigid[eye].reset();
+    }
 #else
     (void)eye;
     (void)clip_to_previous;
+    (void)rigid;
 #endif
 }
 
@@ -1330,6 +1371,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             v.detail_falloff = p.detail_falloff;
         };
         std::array<Params, 2> eye_params{};
+        bool reseeded_pair = false;
         for (UINT f = 0; f < feature_count; ++f) {
             auto &feature = p.features[f];
             const UINT first = shared ? 0 : f, last = shared ? 1 : f;
@@ -1340,6 +1382,12 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 auto &params = eye_params[i];
                 params = p.parameters(bv[i], gb, i, UINT(bv.size()));
                 set_mapping(params, i);
+                if (i < p.test_rigid.size() && p.test_rigid[i]) {
+                    const auto &rigid = *p.test_rigid[i];
+                    std::copy(rigid.begin(), rigid.begin() + 4, params.camera_rotation);
+                    std::copy(rigid.begin() + 4, rigid.end(), params.camera_move);
+                    depth_to_z(gb, params);
+                }
                 const auto &e = p.eyes[i];
                 reseed = reseed || e.serial != ga.serial || e.stream != ga.stream ||
                          e.epoch != ga.epoch ||
@@ -1376,6 +1424,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 t.uav(feature.generated[0].Get());
                 t.uav(feature.disable[0].Get());
                 p.reseeds += last - first + 1;
+                reseeded_pair = true;
             }
             p.begin_pack(t, feature);
             for (UINT i = first; i <= last; ++i) {
@@ -1478,6 +1527,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             readback.outputs = UINT(outputs.size());
         }
         t.restore();
+        if (reseeded_pair) ++p.reseeded_pairs;
         for (UINT i = 0; i < bv.size(); ++i) {
             const auto &gb = *bg->eyes[guide_index(i)];
             p.eyes[i].serial = gb.serial;

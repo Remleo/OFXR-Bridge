@@ -378,6 +378,39 @@ int main(int argc, char** argv) {
         require(has_line(status_panel_text(input), "2 eye images could not be set up", PanelTone::warn),
                 "declined images");
 
+        // A game short of what the frames need (Stellar Blade at 37 a second
+        // on a 120 Hz Steam Frame at 2X): one submission in six repeats, and
+        // the panel says so and what to try, without calling it a fallback.
+        // Native generation that makes one frame cannot try 3X; it also says
+        // how often NGX's history was reset.
+        input = generating(tray_default(), tray_default());
+        input.rates = {73.6f, 36.8f, 36.8f, 16.4f, 120.0f, -1.0f, true};
+        text = status_panel_text(input);
+        require(line_labelled(text, "Pace").text ==
+                        "game 37/s is under the 60 that 2X needs at 120 Hz, so frames repeat: try 3X or a lower refresh rate" &&
+                    line_labelled(text, "Pace").tone == PanelTone::warn,
+                "pace line");
+        require(text.state == "GENERATING", "a short game is not a fallback");
+        asked = PanelMethod{};
+        asked.native = true;
+        asked.native_scale = 67;
+        asked.deep = true;
+        input = generating(asked, asked);
+        input.rates = {73.6f, 36.8f, 36.8f, 16.4f, 120.0f, -1.0f, true};
+        input.native_single_frame = true;
+        input.vectors.native_resets = 11;
+        text = status_panel_text(input);
+        require(line_labelled(text, "Pace").text.ends_with("so frames repeat: try a lower refresh rate"),
+                "single-frame native cannot try 3X");
+        require(line_labelled(text, "Guides").text == "used on 100% of pairs, NGX reset on 100%", "native resets");
+        input.rates = {90.0f, 45.0f, 45.0f, 0.0f, 90.0f, -1.0f, true};
+        input.vectors.native_resets = 0;
+        text = status_panel_text(input);
+        require(std::none_of(text.lines.begin(), text.lines.end(),
+                             [](const PanelLine& line) { return line.label == "Pace"; }),
+                "a game at half the refresh needs no pace line");
+        require(line_labelled(text, "Guides").text == "used on 100% of pairs", "no resets, no mention");
+
         // Frames and session lines.
         input = generating(tray_default(), tray_default());
         input.rates.repeats = 3.3f;

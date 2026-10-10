@@ -48,6 +48,15 @@ cbuffer Params : register(b0) {
     // B's field of view and rectangle. CurrentFallback holds A in the compose.
     uint SyntheticCamera;
     float4 SyntheticRotation;
+    // Tests: the camera's own motion from B to the aligned A, a rotation and
+    // (CameraMove.xyz) a translation taking B's camera space to A's, in the
+    // depth's units. CameraMove.w and DepthToZ linearise a depth d into that
+    // distance, w / (d * DepthToZ.x + DepthToZ.y); with w zero the vectors
+    // are written whole, otherwise less the camera's flow, which NGX is then
+    // told to add back from its matrices.
+    float4 CameraRotation;
+    float4 CameraMove;
+    float2 DepthToZ;
 };
 
 float3 rotate(float3 ray, float4 q) {
@@ -227,10 +236,21 @@ float4 packed_color(Texture2DArray<float4> t, uint2 p) {
     int2 depth_lo = int2(DepthRect.xy);
     int2 depth_hi = max(depth_lo, int2(ceil(DepthRect.xy + DepthRect.zw)) - 1);
     int2 dp = clamp(int2(DepthRect.xy + uv * DepthRect.zw), depth_lo, depth_hi);
+    float2 motion = towards_a(uv);
+    float depth = SourceDepth.Load(int4(dp, GuideSlice, 0));
+    if (CameraMove.w != 0) {
+        // Where the camera's own motion alone would have taken this pixel's
+        // surface: the vector less that is the object's own motion.
+        float z = CameraMove.w / max(depth * DepthToZ.x + DepthToZ.y, 1e-7);
+        float3 b_point = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
+                                lerp(TargetTangents.z, TargetTangents.w, uv.y), -1) * z;
+        float3 a_point = rotate(b_point, CameraRotation) + CameraMove.xyz;
+        motion -= source_uv(a_point, TargetTangents) - uv;
+    }
     // As a fraction of the whole feature, which may hold both eyes.
-    Motion[g] = towards_a(uv) * float2(FeatureExtent) * MotionNormal;
+    Motion[g] = motion * float2(FeatureExtent) * MotionNormal;
     // Dilation chooses motion, while depth remains at the original pixel.
-    Depth[g] = SourceDepth.Load(int4(dp, GuideSlice, 0));
+    Depth[g] = depth;
 }
 
 struct Vertex {

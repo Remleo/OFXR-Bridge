@@ -862,6 +862,9 @@ struct SessionState {
     xrfg::DlssMotionVectorStatistics panel_vectors{};
     std::chrono::steady_clock::time_point panel_vectors_at{};
     std::optional<std::uint32_t> panel_native_frames;
+    // Native pairs NGX's history had been reset for, over every synthesizer,
+    // at the panel's last refresh.
+    std::uint64_t panel_native_resets{};
     // Each synthesizer's GPU time a pair, smoothed, and when it was last
     // measured: there is one per eye in a game with a swapchain per eye, and
     // a pair costs them all. Only while the flight recorder runs, which is
@@ -13577,6 +13580,18 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
     // window would span all of it, so it starts again, and the panel reads
     // the last pair's report instead.
     const auto statistics = xrfg::dlss_motion_vector_statistics();
+    // And the native pairs whose NGX history was reset, over every
+    // synthesizer: one per eye in a game with a swapchain per eye, as the
+    // used counter is.
+    std::uint64_t native_resets = 0;
+    if (session.native) {
+        for (const auto& chain : find_swapchains(state)) {
+            std::scoped_lock lock(chain->mutex);
+            if (chain->frame_generation && chain->frame_generation->synthesizer) {
+                native_resets += chain->frame_generation->synthesizer->native_reseeded_pairs();
+            }
+        }
+    }
     auto& vectors = input.vectors;
     vectors.status = static_cast<xrfg::PanelVectorStatus>(statistics.status);
     vectors.published = statistics.published;
@@ -13589,8 +13604,10 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
             since(statistics.temporal_rejections, state->panel_vectors.temporal_rejections);
         vectors.invalid_rejections =
             since(statistics.invalid_rejections, state->panel_vectors.invalid_rejections);
+        vectors.native_resets = since(native_resets, state->panel_native_resets);
     }
     state->panel_vectors = statistics;
+    state->panel_native_resets = native_resets;
     state->panel_vectors_at = now;
 
     input.gpu_timing = state->recorder_applied;
