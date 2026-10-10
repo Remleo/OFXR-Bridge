@@ -1741,6 +1741,54 @@ per layer of the code, and only the last one touches the game.
   game's rate is under nine tenths of the refresh rate divided by the frames
   a game frame makes (Stellar Blade at 37 a second on a 120 Hz Steam Frame at
   2X, where one submission in six was a repeat), and names what to try.
+- Editing (README, "Changing settings from the panel") is three pieces too.
+  The model (`panel_editables`, `PanelNavigator`, `PanelCursor`,
+  `panel_cursor_apply`) is pure: the editables are derived from the input's
+  `asked` method and the session's flags (3X not through the D3D11 interop
+  nor on single-frame native, the flow fixed without NVIDIA, the camera and
+  the pipeline marked for the next start); the navigator steps on crossing
+  0.6 of the stick, re-arms under 0.3, repeats after 500 ms every 300 ms,
+  and takes the trigger on its press; the cursor's first command only shows
+  it, up and down wrap and drop a staged choice, left and right stage, the
+  trigger applies a staged choice and a stage lives six seconds. The text
+  carries the block when `controls_bound`, the row the cursor stands on in
+  chevrons on a bar (`Canvas::bar`), a staged choice in the accent tone; the
+  panel's texture is 768 high for it and is still cut to its lines. The
+  layer (`create_panel_input`) makes a second action set,
+  `ofxr_panel_input` at priority 1000, with `navigate` (vector2) and
+  `confirm` (boolean) on both hands, and binds them per interaction profile
+  it knows (Touch, Touch Plus and Pro, Index, Vive wand and Focus 3, WMR,
+  HP Reverb, Pico 4 and Neo 3: the thumbstick or trackpad and the trigger's
+  value or click), with a thumbstick-and-trigger guess for any other.
+  `layer_suggest_interaction_profile_bindings` is tiered: the game's
+  bindings with the grips and the controls, then with the grips alone, then
+  as the game made them (record `status_panel` 2, a the tier). The attach
+  takes both sets or falls back to the grip set (3, c whether the controls
+  were taken). `layer_sync_actions` adds the controls' set with the hand's
+  subaction only while the overlay reports the panel on that hand
+  (`interactive_hand`), in the exclusive mode without the game's sets, and
+  reads the two actions there, where changedSinceLastSync is exact, into
+  `panel_input_sample` under `panel_input_mutex`. On the end-frame thread
+  `update_panel_cursor` feeds the navigator every frame, moves the cursor
+  through the editables cached at the last repaint, and applies a change
+  (`apply_panel_change`: the method, resolution, flow, scale and both ways
+  through `embedded::request`; 3X, the hybrid and extrapolation, the
+  camera and the pipeline as ini keys, with `embedded::bump_revision` where
+  a control change re-reads them and `triple_poll_at` cleared for the 3X
+  poll; pause through `ManualArmControl::set_pause` on the tray's event),
+  recorded as `status_panel` 6; the cursor is dropped with the panel that
+  showed it (`panel_visibility_generation`). The tray reads back: a
+  two-second timer, the menu opening and every rewrite of the runtime ini
+  first run `adopt_runtime_changes`, which takes the frame-generation keys
+  of a runtime ini that differs from the one it last wrote or adopted into
+  its settings (`adopt_runtime_ini`, the keys and no other), saves them,
+  and reads the pause event's state; so the tray's own rewrite never
+  reverts a headset change. Tests: the model in `xrfg_status_panel_tests`;
+  the bindings, attach and sync through the fake runtime in
+  `xrfg_layer_panel_input` (seven bindings on Touch, the Index trigger as a
+  click, the simple controller keeping the grips and losing the controls,
+  three sets attached, two synced without a hand); the adoption in
+  `xrfg_standalone_launcher_tests`.
 - The pixels are font8x8's public-domain glyphs (`THIRD_PARTY.md`), grown by
   Scale2x to 16 and 32 pixels once per process, on a 1024-wide texture with a
   rounded, bordered background. Premultiplied alpha, like the counter's;

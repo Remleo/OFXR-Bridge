@@ -140,6 +140,12 @@ inline constexpr char kDefaultPauseHotkey[] = "ctrl+alt+f7";
 [[nodiscard]] std::string nvidia_input_scale_ini_value(
     NvidiaInputScale scale);
 [[nodiscard]] LauncherSettings parse_settings(std::string_view text);
+// Takes the frame-generation keys of the layer's own ini (`[ofxr]`) into the
+// settings, as the status panel in the headset writes them: the method, the
+// native resolution and camera, the flow and its preset and scale, both
+// ways, the hybrid, extrapolation, the deeper pipeline and 3X. Every other
+// setting is left as it was. Returns whether anything changed.
+[[nodiscard]] bool adopt_runtime_ini(LauncherSettings& settings, std::string_view runtime_ini_text);
 [[nodiscard]] std::string serialize_settings(const LauncherSettings& settings);
 
 // The Vulkan implicit layer's manifest, for the loader's ImplicitLayers key.

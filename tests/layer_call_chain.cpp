@@ -1479,6 +1479,11 @@ const auto kApplicationActionSet = reinterpret_cast<XrActionSet>(std::uintptr_t{
 const auto kApplicationAction = reinterpret_cast<XrAction>(std::uintptr_t{0x5102});
 const auto kPanelActionSet = reinterpret_cast<XrActionSet>(std::uintptr_t{0x5201});
 const auto kPanelAction = reinterpret_cast<XrAction>(std::uintptr_t{0x5202});
+// The panel's controls: a second set at a high priority, a stick and a
+// trigger.
+const auto kPanelInputSet = reinterpret_cast<XrActionSet>(std::uintptr_t{0x5301});
+const auto kPanelNavigate = reinterpret_cast<XrAction>(std::uintptr_t{0x5302});
+const auto kPanelConfirm = reinterpret_cast<XrAction>(std::uintptr_t{0x5303});
 std::vector<std::string> g_paths;
 std::uint32_t g_panel_action_sets_made{};
 std::uint32_t g_panel_actions_made{};
@@ -1504,6 +1509,10 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_string_to_path(
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_create_action_set(
     XrInstance, const XrActionSetCreateInfo* info, XrActionSet* action_set) {
+    if (std::strcmp(info->actionSetName, "ofxr_panel_input") == 0 && info->priority > 0) {
+        *action_set = kPanelInputSet;
+        return XR_SUCCESS;
+    }
     if (std::strcmp(info->actionSetName, "ofxr_status_panel") != 0 || info->priority != 0) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
@@ -1518,14 +1527,43 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_action_set(XrActionSet) {
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_create_action(
     XrActionSet action_set, const XrActionCreateInfo* info, XrAction* action) {
-    if (action_set != kPanelActionSet || info->actionType != XR_ACTION_TYPE_POSE_INPUT ||
-        info->countSubactionPaths != 2 ||
+    if (info->countSubactionPaths != 2 ||
         info->subactionPaths[0] != fake_path("/user/hand/left") ||
         info->subactionPaths[1] != fake_path("/user/hand/right")) {
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    if (action_set == kPanelInputSet) {
+        if (info->actionType == XR_ACTION_TYPE_VECTOR2F_INPUT && std::strcmp(info->actionName, "navigate") == 0) {
+            *action = kPanelNavigate;
+            return XR_SUCCESS;
+        }
+        if (info->actionType == XR_ACTION_TYPE_BOOLEAN_INPUT && std::strcmp(info->actionName, "confirm") == 0) {
+            *action = kPanelConfirm;
+            return XR_SUCCESS;
+        }
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    if (action_set != kPanelActionSet || info->actionType != XR_ACTION_TYPE_POSE_INPUT) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
     ++g_panel_actions_made;
     *action = kPanelAction;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_get_action_state_vector2f(
+    XrSession, const XrActionStateGetInfo* info, XrActionStateVector2f* state) {
+    if (info->action != kPanelNavigate) return XR_ERROR_VALIDATION_FAILURE;
+    *state = {XR_TYPE_ACTION_STATE_VECTOR2F};
+    state->isActive = XR_FALSE;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_get_action_state_boolean(
+    XrSession, const XrActionStateGetInfo* info, XrActionStateBoolean* state) {
+    if (info->action != kPanelConfirm) return XR_ERROR_VALIDATION_FAILURE;
+    *state = {XR_TYPE_ACTION_STATE_BOOLEAN};
+    state->isActive = XR_FALSE;
     return XR_SUCCESS;
 }
 
@@ -1538,6 +1576,14 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_suggest_bindings(
     if (suggested->interactionProfile == fake_path("/interaction_profiles/microsoft/xbox_controller") &&
         std::any_of(bindings.begin(), bindings.end(),
                     [](const XrActionSuggestedBinding& binding) { return binding.action != kApplicationAction; })) {
+        return XR_ERROR_PATH_UNSUPPORTED;
+    }
+    // The simple controller has a grip but no stick: the controls are
+    // refused, the grips are not.
+    if (suggested->interactionProfile == fake_path("/interaction_profiles/khr/simple_controller") &&
+        std::any_of(bindings.begin(), bindings.end(), [](const XrActionSuggestedBinding& binding) {
+            return binding.action == kPanelNavigate || binding.action == kPanelConfirm;
+        })) {
         return XR_ERROR_PATH_UNSUPPORTED;
     }
     g_suggested = std::move(bindings);
@@ -1650,6 +1696,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
         XRFG_FAKE_FUNCTION("xrAttachSessionActionSets", fake_attach_action_sets)
         XRFG_FAKE_FUNCTION("xrSyncActions", fake_sync_actions)
         XRFG_FAKE_FUNCTION("xrCreateActionSpace", fake_create_action_space)
+        XRFG_FAKE_FUNCTION("xrGetActionStateVector2f", fake_get_action_state_vector2f)
+        XRFG_FAKE_FUNCTION("xrGetActionStateBoolean", fake_get_action_state_boolean)
     }
 #undef XRFG_FAKE_FUNCTION
     return XR_ERROR_FUNCTION_UNSUPPORTED;
@@ -2820,21 +2868,45 @@ int main(int argc, char** argv) {
             return fail("no grip action set made at xrCreateInstance");
         }
         // A controller: the application's binding reaches the runtime with
-        // the layer's two grips beside it.
+        // the layer's two grips beside it, and the panel's controls: the
+        // thumbstick and trigger of each hand.
         const XrActionSuggestedBinding controller_binding{
             kApplicationAction, fake_path("/user/hand/right/input/a/click")};
         XrInteractionProfileSuggestedBinding controller{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
         controller.interactionProfile = fake_path("/interaction_profiles/oculus/touch_controller");
         controller.countSuggestedBindings = 1;
         controller.suggestedBindings = &controller_binding;
-        if (suggest(instance, &controller) != XR_SUCCESS || g_suggested.size() != 3 ||
+        if (suggest(instance, &controller) != XR_SUCCESS || g_suggested.size() != 7 ||
             g_suggested[0].action != kApplicationAction ||
             g_suggested[0].binding != controller_binding.binding ||
             g_suggested[1].action != kPanelAction ||
             g_suggested[1].binding != fake_path("/user/hand/left/input/grip/pose") ||
             g_suggested[2].action != kPanelAction ||
-            g_suggested[2].binding != fake_path("/user/hand/right/input/grip/pose")) {
+            g_suggested[2].binding != fake_path("/user/hand/right/input/grip/pose") ||
+            g_suggested[3].action != kPanelNavigate ||
+            g_suggested[3].binding != fake_path("/user/hand/left/input/thumbstick") ||
+            g_suggested[4].action != kPanelConfirm ||
+            g_suggested[4].binding != fake_path("/user/hand/left/input/trigger/value") ||
+            g_suggested[5].action != kPanelNavigate ||
+            g_suggested[5].binding != fake_path("/user/hand/right/input/thumbstick") ||
+            g_suggested[6].action != kPanelConfirm ||
+            g_suggested[6].binding != fake_path("/user/hand/right/input/trigger/value")) {
             return fail("controller bindings not merged");
+        }
+        // The Index: its trigger binds as a click.
+        XrInteractionProfileSuggestedBinding index = controller;
+        index.interactionProfile = fake_path("/interaction_profiles/valve/index_controller");
+        if (suggest(instance, &index) != XR_SUCCESS || g_suggested.size() != 7 ||
+            g_suggested[4].binding != fake_path("/user/hand/left/input/trigger/click")) {
+            return fail("Index bindings");
+        }
+        // A controller with a grip but no stick keeps the grips and loses
+        // the controls.
+        XrInteractionProfileSuggestedBinding simple = controller;
+        simple.interactionProfile = fake_path("/interaction_profiles/khr/simple_controller");
+        if (suggest(instance, &simple) != XR_SUCCESS || g_suggested.size() != 3 ||
+            g_suggested[2].action != kPanelAction) {
+            return fail("a refused control cost the grips");
         }
         // A gamepad refuses the grips: the application's suggestion is made
         // again as it was, and succeeds.
@@ -2848,17 +2920,19 @@ int main(int argc, char** argv) {
             g_suggested[0].binding != gamepad_binding.binding) {
             return fail("a refused grip cost the application its gamepad bindings");
         }
-        // Attached beside the application's set, with a grip space a hand.
+        // Attached beside the application's set, the controls' set too,
+        // with a grip space a hand.
         XrSessionActionSetsAttachInfo attach_info{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
         attach_info.countActionSets = 1;
         attach_info.actionSets = &kApplicationActionSet;
-        if (attach(session, &attach_info) != XR_SUCCESS || g_attached.size() != 2 ||
+        if (attach(session, &attach_info) != XR_SUCCESS || g_attached.size() != 3 ||
             g_attached[0] != kApplicationActionSet || g_attached[1] != kPanelActionSet ||
-            g_panel_spaces.size() != 2) {
-            return fail("action set or grip spaces not attached");
+            g_attached[2] != kPanelInputSet || g_panel_spaces.size() != 2) {
+            return fail("action sets or grip spaces not attached");
         }
-        // Synced with the application's, every time; and when the runtime
-        // will not have it, the application's sync goes through alone.
+        // Synced with the application's, every time, without the controls
+        // while the panel is on no hand; and when the runtime will not have
+        // it, the application's sync goes through alone.
         const XrActiveActionSet active{kApplicationActionSet, XR_NULL_PATH};
         XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
         sync_info.countActiveActionSets = 1;

@@ -507,6 +507,35 @@ int main() {
         return 1;
     }
 
+    // The headset's status panel writes the layer's ini; the tray adopts
+    // those keys and only those, and reports whether anything moved.
+    {
+        LauncherSettings adopted = release_defaults;
+        adopted.excluded_processes = "Keep.exe";
+        const std::string from_panel =
+            "[ofxr]\r\nbackend=fidelityfx\r\nframe_generation=dlss\r\ndlssg_resolution=100\r\n"
+            "dlssg_camera=1\r\nmotion_vectors=dlss\r\ndlss_flow_hybrid=0\r\nextrapolate=0\r\n"
+            "nvidia_preset=fast\r\nnvidia_input_scale=75\r\nnvidia_bidirectional=1\r\n"
+            "deep_pipeline=0\r\ntriple_frame_gen=1\r\nexcluded_processes=Other.exe\r\n"
+            "[diagnostics]\r\nlogging_enabled=1\r\n";
+        const bool changed = adopt_runtime_ini(adopted, from_panel);
+        if (!changed || adopted.frame_generation != FrameGeneration::native_dlss || adopted.native_scale != 100 ||
+            !adopted.native_camera || adopted.backend != FlowBackend::fidelity_fx ||
+            adopted.nvidia_preset != NvidiaPerformancePreset::fast ||
+            adopted.nvidia_input_scale != NvidiaInputScale::three_quarter || !adopted.nvidia_bidirectional ||
+            adopted.dlss_flow_hybrid || adopted.extrapolate || adopted.deep_pipeline || !adopted.triple_frame_gen ||
+            adopted.excluded_processes != "Keep.exe" || adopt_runtime_ini(adopted, from_panel)) {
+            std::cerr << "adopting the runtime ini failed\n";
+            return 1;
+        }
+        // What the tray itself wrote adopts back unchanged.
+        LauncherSettings round = release_defaults;
+        if (adopt_runtime_ini(round, build_runtime_ini(release_defaults))) {
+            std::cerr << "the tray's own runtime ini read as a change\n";
+            return 1;
+        }
+    }
+
     std::cout << "OFXR manual persistent launcher support tests passed\n";
     return 0;
 }

@@ -270,6 +270,63 @@ LauncherSettings parse_settings(std::string_view text) {
     return settings;
 }
 
+bool adopt_runtime_ini(LauncherSettings& settings, std::string_view text) {
+    const LauncherSettings before = settings;
+    std::string section;
+    std::size_t offset = 0;
+    while (offset <= text.size()) {
+        const std::size_t newline = text.find('\n', offset);
+        const std::size_t length = newline == std::string_view::npos ? text.size() - offset : newline - offset;
+        std::string line = trim_ascii(text.substr(offset, length));
+        if (!line.empty() && line.front() == '[' && line.back() == ']') {
+            section = lower_ascii(trim_ascii(std::string_view(line).substr(1, line.size() - 2)));
+        } else if (section == "ofxr" && !line.empty() && line.front() != ';' && line.front() != '#') {
+            const std::size_t equals = line.find('=');
+            if (equals != std::string::npos) {
+                const std::string key = lower_ascii(trim_ascii(std::string_view(line).substr(0, equals)));
+                const std::string value = trim_ascii(std::string_view(line).substr(equals + 1));
+                const bool on = value == "1" || lower_ascii(value) == "true";
+                if (key == "frame_generation") {
+                    settings.frame_generation = lower_ascii(value) == "dlss"
+                        ? FrameGeneration::native_dlss : FrameGeneration::ofxr;
+                } else if (key == "dlssg_resolution") {
+                    const int percent = std::atoi(value.c_str());
+                    if (percent >= 25 && percent <= 100) settings.native_scale = percent;
+                } else if (key == "dlssg_camera") {
+                    settings.native_camera = on;
+                } else if (key == "backend") {
+                    settings.backend = lower_ascii(value) == "nvidia" ? FlowBackend::nvidia : FlowBackend::fidelity_fx;
+                } else if (key == "nvidia_preset") {
+                    const std::string normalized = lower_ascii(value);
+                    settings.nvidia_preset = normalized == "slow" ? NvidiaPerformancePreset::slow
+                        : normalized == "fast" ? NvidiaPerformancePreset::fast : NvidiaPerformancePreset::medium;
+                } else if (key == "nvidia_input_scale") {
+                    settings.nvidia_input_scale = value == "75" ? NvidiaInputScale::three_quarter
+                        : value == "50" ? NvidiaInputScale::half : NvidiaInputScale::full;
+                } else if (key == "nvidia_bidirectional") {
+                    settings.nvidia_bidirectional = on;
+                } else if (key == "dlss_flow_hybrid") {
+                    settings.dlss_flow_hybrid = on;
+                } else if (key == "extrapolate") {
+                    settings.extrapolate = on;
+                } else if (key == "deep_pipeline") {
+                    settings.deep_pipeline = on;
+                } else if (key == "triple_frame_gen") {
+                    settings.triple_frame_gen = on;
+                }
+            }
+        }
+        if (newline == std::string_view::npos) break;
+        offset = newline + 1;
+    }
+    return settings.frame_generation != before.frame_generation || settings.native_scale != before.native_scale ||
+        settings.native_camera != before.native_camera || settings.backend != before.backend ||
+        settings.nvidia_preset != before.nvidia_preset || settings.nvidia_input_scale != before.nvidia_input_scale ||
+        settings.nvidia_bidirectional != before.nvidia_bidirectional ||
+        settings.dlss_flow_hybrid != before.dlss_flow_hybrid || settings.extrapolate != before.extrapolate ||
+        settings.deep_pipeline != before.deep_pipeline || settings.triple_frame_gen != before.triple_frame_gen;
+}
+
 std::string serialize_settings(const LauncherSettings& settings) {
     return "[tray]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +

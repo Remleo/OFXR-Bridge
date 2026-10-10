@@ -38,6 +38,10 @@ constexpr UINT kBenchmarkProgressMessage = WM_APP + 2;
 constexpr UINT kBenchmarkFinishedMessage = WM_APP + 3;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
+// Every two seconds while armed: has the status panel in the headset
+// changed the layer's ini, or the pause?
+constexpr UINT_PTR kAdoptTimerId = 2;
+constexpr UINT kAdoptTimerMs = 2000;
 constexpr UINT kArmPollMilliseconds = 250;
 constexpr std::uint32_t kImplementationVersion = XRFG_IMPLEMENTATION_VERSION;
 // One Donate entry each, creator first, as in the About box and the README.
@@ -122,6 +126,9 @@ struct AppState {
     // with it, so every arm starts resumed; null if it could not be made.
     HANDLE pause_signal{};
     bool paused{};
+    // The runtime ini as the tray last wrote or adopted it, so a change the
+    // headset's panel made is told from the tray's own rewrite.
+    mutable std::string runtime_ini_last;
     // The `pause_hotkey` of tray.ini is held system-wide, while armed only.
     bool pause_hotkey_registered{};
     // Alternate namespace used by lifecycle tests, never read from user INI.
@@ -340,8 +347,11 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         configuration.insert(std::string("[ofxr]\r\n").size(),
             "control_event=" + ascii_control + "\r\n");
     }
-    return write_text_atomic(destination, configuration, error);
+    if (!write_text_atomic(destination, configuration, error)) return false;
+    state.runtime_ini_last = configuration;
+    return true;
 }
+
 
 [[nodiscard]] bool prepare_runtime_layer(
     AppState& state,
@@ -736,10 +746,49 @@ void close_pause_signal(AppState& state) {
     return true;
 }
 
+// A change the status panel made from the headset: the layer writes the
+// runtime ini, and the tray takes those keys into its own settings, so its
+// menu agrees, the next game start keeps them, and its next rewrite of the
+// ini does not revert them. The pause event likewise reads back. Called
+// before the tray rewrites the ini, before its menu opens, and on a timer
+// while armed.
+void adopt_runtime_changes(AppState& state, bool announce) {
+    if (!state.armed) return;
+    try {
+        if (state.pause_signal) {
+            const bool paused = WaitForSingleObject(state.pause_signal, 0) == WAIT_OBJECT_0;
+            if (paused != state.paused) {
+                state.paused = paused;
+                refresh_tray_icon(state);
+            }
+        }
+        const auto path = runtime_directory(state.local_directory) / L"ofxr_bridge.ini";
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) return;
+        std::ostringstream text;
+        text << stream.rdbuf();
+        const std::string content = text.str();
+        if (content == state.runtime_ini_last) return;
+        state.runtime_ini_last = content;
+        if (!xrfg::standalone::adopt_runtime_ini(state.settings, content)) return;
+        save_settings(state);
+        state.benchmark.settings_changed(state.settings);
+        refresh_tray_icon(state);
+        if (announce) {
+            show_balloon(state, L"OFXR options changed from the headset",
+                         L"The status panel's change is saved; the tray's menu shows it.");
+        }
+    } catch (...) {
+    }
+}
+
 // `running_message`: what the balloon says for an option a running game
 // follows; without one the option is for the next session.
 void update_runtime_options(
     AppState& state, const wchar_t* running_message = nullptr) {
+    // A change the headset made since is taken up first, so a rewrite of
+    // the ini never reverts it.
+    adopt_runtime_changes(state, false);
     save_settings(state);
     state.benchmark.settings_changed(state.settings);
     if (state.armed) {
@@ -989,6 +1038,7 @@ void append_separator(HMENU menu) {
 void show_context_menu(AppState& state) {
     namespace sl = xrfg::standalone;
     namespace bm = xrfg::benchmark;
+    adopt_runtime_changes(state, false);
     HMENU menu = CreatePopupMenu();
     if (menu == nullptr) return;
     const auto& settings = state.settings;
@@ -1650,6 +1700,9 @@ LRESULT CALLBACK window_procedure(
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
         return 0;
+    case WM_TIMER:
+        if (wparam == kAdoptTimerId) adopt_runtime_changes(*state, true);
+        return 0;
     case kBenchmarkProgressMessage:
         state->benchmark.on_progress();
         return 0;
@@ -1880,6 +1933,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         nullptr,
         instance,
         &state);
+    if (window != nullptr) SetTimer(window, kAdoptTimerId, kAdoptTimerMs, nullptr);
     if (window == nullptr || !add_tray_icon(state)) {
         if (window) DestroyWindow(window);
         CloseHandle(single_instance);

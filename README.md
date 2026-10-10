@@ -1183,13 +1183,46 @@ Then a line each:
 | **Pace** | Shown when the game runs under what 2X or 3X needs at the display's refresh rate (by more than a tenth): frames then repeat unevenly, which reads as judder or doubling whatever the generated frames look like. It names what to try, 3X or a lower refresh rate; a GPU whose DLSS Frame Generation makes one frame gets the refresh rate alone. |
 | **Session** | The game's graphics API, through which of the bridge's paths, and the OpenXR runtime. |
 
+### Changing settings from the panel
+
+While the panel is up on a controller, that controller's thumbstick and
+trigger edit it. Below the status lines the panel lists the settings: how
+many frames a game frame makes (2X or 3X), the method, DLSS Frame
+Generation's resolution and camera motion, OFXR's flow and its scale, both
+ways, its mode (interpolate, the hybrid, extrapolate), the pipeline, and
+pause. Push the stick once to bring up the cursor, up and down to move it,
+left and right to step the highlighted setting to the next choice, which is
+shown beside the current one, and pull the trigger to apply it. A staged
+choice is dropped if the cursor moves, the panel goes, or six seconds pass,
+and the trigger does nothing with nothing staged, so a glance at the panel
+never changes anything. Pause takes effect at once; the method, resolution,
+flow, flow scale, both ways, the hybrid and 2X or 3X take effect in the
+running game within a moment; camera motion, the pipeline and extrapolation
+say "from the next game start". The tray reads every change back within
+two seconds, so its menu agrees and the change survives the next game
+start and the tray's own rewrites of the layer's ini.
+
+The controls are bound in an action set of their own, at a priority above
+a game's, for the hand the panel is on and only while it is up. On a
+runtime that honours priorities the game does not see that hand's stick
+and trigger meanwhile; on one that does not, the game may react as well
+(a snap turn on the stick, say). `[overlay] panel_input=exclusive` keeps
+every game action out of the sync while the panel is up, which stops that
+at the cost of all game input for those moments; `panel_input=off` binds
+no controls at all. A controller without a stick, or a runtime that refuses
+the bindings, keeps the gesture and loses the controls; the panel then
+shows the status alone.
+
 **FPS overlay** in the tray has three settings for the panel: **On a
 controller turned upside down** (the default), **Always, low in the view**,
 and **Off**. In the layer's ini they are `[overlay] panel=gesture`, `always`
-and `off`.
+and `off`; the controls are `[overlay] panel_input=hand` (the default),
+`exclusive` or `off`.
 
 To read the controllers, the bridge adds one action of its own to the game's
-input: a controller pose, bound to both grips beside the game's own bindings.
+input: a controller pose, bound to both grips beside the game's own bindings,
+and, for the panel's controls, a second action set with a thumbstick and a
+trigger action a hand.
 If the runtime refuses it for a controller (a gamepad, for example), the
 game's bindings are set up exactly as the game asked, so the game's input
 never depends on it. A runtime's controller-binding screen, SteamVR's for
