@@ -1102,6 +1102,44 @@ alone; the per-eye test checks each eye's bridge, also where both eyes were
 evaluated before either was released. `XRFG_TEST_GUIDES_ONLY=1` runs these
 tests alone.
 
+Stellar Blade's demo was then checked turning its camera (the right stick
+driven through a UEVR XInput callback) in each way it can be run, recording
+every run and replaying it; where the scene moved, generating each middle
+frame:
+
+| UEVR | Mode | Native 100% / 67% | OFXR + DLSS vectors | Hybrid | NVIDIA |
+|---|---|---|---|---|---|
+| nightly 01139 | Native Stereo | 7.11 / 7.31 | 6.91 | 6.76 | 6.84 |
+| nightly 01139 | Synchronized Sequential | 9.52 / 10.43 | 9.86 | 9.57 | 9.56 |
+| a custom build | Native Stereo | 7.95 / 8.00 | 8.04 | 7.78 | 7.88 |
+| a custom build | Native Stereo, its stereo fix on | 9.68 / 10.65 | 7.82 | 7.87 | 7.76 |
+| a custom build | Synchronized Sequential | 9.32 / 10.04 | 10.22 | 9.66 | 9.37 |
+
+The game's right eye draws its sky as horizontal streaks in Native Stereo
+under both builds - in the real frames, which generation reproduces; neither
+`r.VolumetricCloud 0` nor `r.VolumetricRenderTarget 0` changed it, and only
+the custom build's stereo fix drew it right. With the fix the game also ran
+at the full 45 + 45 a second where it had held 37. Its runs turned the camera
+faster (about 90 pixels a frame against 50), and native generation fell
+behind there; but native always generates at a half and the replay scores
+at the frames' own share (their frame times ran 19-32 ms), and with every
+method generating at a half (`XRFG_TEST_REPLAY_FRACTION=0.5`) they all erred
+9.2-9.5 against native's 9.7. The replay now also prints each eye's error
+where the scene moved (`eye_moving=<left>,<right>`): native's was higher in
+both eyes alike there, so neither eye's guides are at fault.
+
+Native generation is aligned by the head's turn alone; a game camera's own
+turn, from a mouse or a stick, reaches NGX only through the vectors.
+`XRFG_TEST_REPLAY_NATIVE_GAME_ROTATION=1` fits the whole turn between the two
+frames to B's vectors (Gauss-Newton on a rotation taking B's view rays to the
+rays of where the vectors put their content in A, over a 48x48 grid, keeping
+the closest three quarters of the points each pass), aligns A by it and turns
+the generated frame back by half of it. On the fast runs above (5.6-5.7
+degrees a pair) native erred 9.31 against 9.68 at 100% and 10.18 against
+10.65 at 67%. Live it would need the fit on the GPU and the rotation on the
+CPU for the compose and the reseed decision, a frame later; for 4% it is not
+built.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:

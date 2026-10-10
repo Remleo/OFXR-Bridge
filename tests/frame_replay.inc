@@ -491,6 +491,10 @@ void replay_held_out(const std::filesystem::path& directory) {
         struct Sums {
             double all = 0, moved = 0, ssim = 0, gradient_out = 0, gradient_truth = 0, gradient_error = 0;
             std::size_t all_count = 0, moved_count = 0, blocks = 0, gradients = 0;
+            // Where the scene moved, per eye: each half of a side-by-side
+            // image, or each slice of an array.
+            double eye_moved[2]{};
+            std::size_t eye_moved_count[2]{};
         };
         std::vector<Sums> sums(std::thread::hardware_concurrency() + 1);
         const UINT rows = height * slices;
@@ -508,6 +512,9 @@ void replay_held_out(const std::filesystem::path& directory) {
                     if (!moving[i]) continue;
                     sum.moved += e;
                     sum.moved_count += 3;
+                    const UINT eye = slices > 1 ? std::min<UINT>(row / height, 1) : (x >= width / 2 ? 1 : 0);
+                    sum.eye_moved[eye] += e;
+                    sum.eye_moved_count[eye] += 3;
                     // The output's gradient against the truth's (below 1 is
                     // blurrier) and their mean difference, which a blur and a
                     // misplaced edge both raise.
@@ -549,6 +556,10 @@ void replay_held_out(const std::filesystem::path& directory) {
             total.gradient_error += s.gradient_error;
             total.all_count += s.all_count; total.moved_count += s.moved_count;
             total.blocks += s.blocks; total.gradients += s.gradients;
+            for (int eye = 0; eye < 2; ++eye) {
+                total.eye_moved[eye] += s.eye_moved[eye];
+                total.eye_moved_count[eye] += s.eye_moved_count[eye];
+            }
         }
         std::cout << "replay " << name << " mae=" << total.all / double(total.all_count)
                   << " moving=" << (total.moved_count ? total.moved / double(total.moved_count) : 0.0)
@@ -556,6 +567,8 @@ void replay_held_out(const std::filesystem::path& directory) {
                   << " ssim=" << (total.blocks ? total.ssim / double(total.blocks) : 1.0)
                   << " sharpness=" << (total.gradient_truth > 0 ? total.gradient_out / total.gradient_truth : 1.0)
                   << " gradient_error=" << (total.gradients ? total.gradient_error / double(total.gradients) : 0.0)
+                  << " eye_moving=" << (total.eye_moved_count[0] ? total.eye_moved[0] / double(total.eye_moved_count[0]) : 0.0)
+                  << ',' << (total.eye_moved_count[1] ? total.eye_moved[1] / double(total.eye_moved_count[1]) : 0.0)
                   << '\n';
     };
     score("repeat frame2", f2.colour);
@@ -756,14 +769,140 @@ void replay_held_out(const std::filesystem::path& directory) {
             const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
             q.x /= n; q.y /= n; q.z /= n; q.w /= n;
         }
-        const std::span<const xrfg::D3D12ReprojectionView> native_a = unaligned ? views2 : views0;
+        std::span<const xrfg::D3D12ReprojectionView> native_a = unaligned ? views2 : views0;
+        // XRFG_TEST_REPLAY_NATIVE_GAME_ROTATION=1 aligns A by the whole turn
+        // between the frames, the game camera's included, fitted to B's
+        // vectors: a rotation taking B's view rays to where the vectors put
+        // their content in A. A is given the orientation that makes it the
+        // alignment's, and the generated frame is turned back by half of it.
+        std::vector<xrfg::D3D12ReprojectionView> rotated_a(views0.begin(), views0.end());
+        std::vector<xrfg::D3D12ReprojectionView> rotated_target(views1.begin(), views1.end());
+        const bool game_rotation = std::getenv("XRFG_TEST_REPLAY_NATIVE_GAME_ROTATION") != nullptr &&
+            !unaligned && views0.size() == views2.size() && views1.size() == views2.size();
+        if (game_rotation) {
+            using Q = xrfg::Quaternion;
+            const auto mul = [](const Q& a, const Q& b) {
+                return Q{a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                         a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+            };
+            const auto conj = [](const Q& q) { return Q{-q.x, -q.y, -q.z, q.w}; };
+            const auto apply = [&](const Q& q, std::array<double, 3> v) {
+                const Q p{float(v[0]), float(v[1]), float(v[2]), 0.0F};
+                const Q r = mul(mul(q, p), conj(q));
+                return std::array<double, 3>{r.x, r.y, r.z};
+            };
+            const auto half_to_float = [](std::uint16_t h) {
+                const int exponent = (h >> 10) & 31, mantissa = h & 1023;
+                float value = exponent == 0 ? std::ldexp(float(mantissa), -24)
+                                            : std::ldexp(float(mantissa | 1024), exponent - 25);
+                return (h & 0x8000) ? -value : value;
+            };
+            for (std::size_t e = 0; e < views2.size() && e < f2_guides.guides.size(); ++e) {
+                xrfg::DumpedTexture motion;
+                if (f2_guides.motion_files[e] == "-" ||
+                    !xrfg::read_dumped_texture(frame_dir(b_index + guide_shift) / f2_guides.motion_files[e], &motion) ||
+                    (motion.format != DXGI_FORMAT_R16G16_FLOAT && motion.format != DXGI_FORMAT_R32G32_FLOAT)) continue;
+                const auto& g = f2_guides.guides[e];
+                const auto& vb = views2[e];
+                const auto& va = views0[e];
+                const auto texel = [&](UINT x, UINT y) {
+                    const auto& s = motion.subresources[g.motion_slice];
+                    const std::uint8_t* p = s.data.data() + std::size_t(y) * s.row_bytes;
+                    if (motion.format == DXGI_FORMAT_R32G32_FLOAT) {
+                        float v[2];
+                        std::memcpy(v, p + std::size_t(x) * 8, 8);
+                        return std::array<float, 2>{v[0], v[1]};
+                    }
+                    std::uint16_t h[2];
+                    std::memcpy(h, p + std::size_t(x) * 4, 4);
+                    return std::array<float, 2>{half_to_float(h[0]), half_to_float(h[1])};
+                };
+                const auto ray = [](const xrfg::D3D12FieldOfView& f, double u, double v) {
+                    const double l = std::tan(f.angle_left), r = std::tan(f.angle_right);
+                    const double up = std::tan(f.angle_up), down = std::tan(f.angle_down);
+                    std::array<double, 3> d{l + u * (r - l), up - v * (up - down), -1.0};
+                    const double n = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                    return std::array<double, 3>{d[0] / n, d[1] / n, d[2] / n};
+                };
+                // B's ray and the ray of where its content was in A.
+                std::vector<std::pair<std::array<double, 3>, std::array<double, 3>>> pairs;
+                constexpr UINT kGrid = 48;
+                for (UINT j = 0; j < kGrid; ++j)
+                    for (UINT i = 0; i < kGrid; ++i) {
+                        const double u = (i + 0.5) / kGrid, v = (j + 0.5) / kGrid;
+                        const auto m = texel(g.motion_x + UINT(u * g.motion_width), g.motion_y + UINT(v * g.motion_height));
+                        const double du = double(m[0]) * g.scale_x * vector_scale / g.motion_width;
+                        const double dv = double(m[1]) * g.scale_y * vector_scale / g.motion_height;
+                        if (!std::isfinite(du) || !std::isfinite(dv) || std::abs(du) > 1 || std::abs(dv) > 1) continue;
+                        pairs.emplace_back(ray(vb.fov, u, v), ray(va.fov, u + du, v + dv));
+                    }
+                if (pairs.size() < 64) continue;
+                // Gauss-Newton on the rotation, dropping the worst fitting
+                // points (objects moving on their own) as it goes.
+                Q r{0, 0, 0, 1};
+                std::vector<std::uint8_t> use(pairs.size(), 1);
+                for (int pass = 0; pass < 6; ++pass) {
+                    double h[3][3]{}, b[3]{};
+                    std::vector<double> residual(pairs.size(), 0.0);
+                    for (std::size_t k = 0; k < pairs.size(); ++k) {
+                        const auto s = apply(r, pairs[k].first);
+                        const auto& t = pairs[k].second;
+                        const std::array<double, 3> err{t[0] - s[0], t[1] - s[1], t[2] - s[2]};
+                        residual[k] = std::sqrt(err[0] * err[0] + err[1] * err[1] + err[2] * err[2]);
+                        if (!use[k]) continue;
+                        const double ss = s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
+                        for (int a = 0; a < 3; ++a)
+                            for (int c = 0; c < 3; ++c) h[a][c] += (a == c ? ss : 0.0) - s[a] * s[c];
+                        b[0] += s[1] * err[2] - s[2] * err[1];
+                        b[1] += s[2] * err[0] - s[0] * err[2];
+                        b[2] += s[0] * err[1] - s[1] * err[0];
+                    }
+                    const double det = h[0][0] * (h[1][1] * h[2][2] - h[1][2] * h[2][1]) -
+                                       h[0][1] * (h[1][0] * h[2][2] - h[1][2] * h[2][0]) +
+                                       h[0][2] * (h[1][0] * h[2][1] - h[1][1] * h[2][0]);
+                    if (std::abs(det) < 1e-12) break;
+                    double x[3];
+                    for (int col = 0; col < 3; ++col) {
+                        double m[3][3];
+                        for (int a = 0; a < 3; ++a)
+                            for (int c = 0; c < 3; ++c) m[a][c] = c == col ? b[a] : h[a][c];
+                        x[col] = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+                                  m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                                  m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])) / det;
+                    }
+                    const double angle = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]);
+                    const double sh = angle > 1e-12 ? std::sin(angle / 2) / angle : 0.5;
+                    const Q step{float(x[0] * sh), float(x[1] * sh), float(x[2] * sh), float(std::cos(angle / 2))};
+                    r = mul(step, r);
+                    // Keep the closer three quarters of the points for the next pass.
+                    std::vector<double> sorted(residual);
+                    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() * 3 / 4, sorted.end());
+                    const double cut = sorted[sorted.size() * 3 / 4];
+                    for (std::size_t k = 0; k < pairs.size(); ++k) use[k] = residual[k] <= cut;
+                }
+                if (r.w < 0) r = Q{-r.x, -r.y, -r.z, -r.w};
+                // b_to_a(a', b) = conj(qA') qB = r, so qA' = qB conj(r).
+                const Q qb = vb.pose.orientation;
+                rotated_a[e].pose.orientation = mul(qb, conj(r));
+                // Half the turn back from B: the camera of NGX's midpoint.
+                const float half_w = std::sqrt(std::max(0.0F, (1.0F + r.w) / 2.0F));
+                const float scale = half_w > 1e-6F ? 0.5F / half_w : 0.0F;
+                const Q half{r.x * scale, r.y * scale, r.z * scale, half_w};
+                rotated_target[e].pose.orientation = mul(qb, conj(half));
+                std::cout << "replay native game rotation eye " << e << ": "
+                          << 2.0 * std::acos(std::min(1.0, double(std::abs(r.w)))) * 57.29578 << " degrees\n";
+            }
+            native_a = rotated_a;
+        }
+        const std::span<const xrfg::D3D12ReprojectionView> native_target =
+            game_rotation ? std::span<const xrfg::D3D12ReprojectionView>(rotated_target) : views1;
         if (!std::getenv("XRFG_TEST_REPLAY_NATIVE_B_CAMERA") && views1.size() == views2.size() &&
             !views1.empty()) {
             std::array<std::array<float, 4>, 2> rotations{};
             for (std::size_t view = 0; view < rotations.size(); ++view) {
                 const std::size_t index = std::min(view, views1.size() - 1);
                 rotations[view] = xrfg::synthetic_camera_to_current(
-                    unaligned ? midpoint[index] : views2[index], views1[index]);
+                    unaligned ? midpoint[index] : views2[index], native_target[index]);
             }
             outputs[0].camera_to_current = rotations;
         }
