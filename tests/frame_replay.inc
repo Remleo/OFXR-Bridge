@@ -1162,14 +1162,26 @@ void replay_held_out(const std::filesystem::path& directory) {
                                               outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 });
             }
-            for (UINT eye = 0; eye < 2; ++eye) {
-                if (const auto fit = native.last_camera_fit(eye)) {
-                    std::cout << "replay native gpu fit eye " << eye << ": " << fit->degrees << " degrees, translation "
-                              << fit->translation[0] << ' ' << fit->translation[1] << ' ' << fit->translation[2]
-                              << ", median residual " << fit->residual_px << " px, inliers " << fit->inliers
-                              << " of " << fit->points << '\n';
+            // The fit the generating pair was handed, then the pair's own:
+            // the fit of its vectors as packed, less that camera flow, which
+            // the pair after it would take as the camera's motion entire.
+            // With the flow added back in the fit the two agree on a steady
+            // turn; fitting the packed vectors as they were measured what
+            // was left over instead.
+            const auto print_fits = [&](const char* which) {
+                for (UINT eye = 0; eye < 2; ++eye) {
+                    if (const auto fit = native.last_camera_fit(eye)) {
+                        std::cout << "replay native gpu fit " << which << " eye " << eye << ": " << fit->degrees
+                                  << " degrees, translation " << fit->translation[0] << ' ' << fit->translation[1]
+                                  << ' ' << fit->translation[2] << ", median residual " << fit->residual_px
+                                  << " px, inliers " << fit->inliers << " of " << fit->points << '\n';
+                    }
                 }
-            }
+            };
+            print_fits("handed");
+            fence_fits();
+            native.poll_camera_fits();
+            print_fits("own");
             std::cout << "replay native gpu fits used=" << native.camera_fits_used()
                       << " rejected=" << native.camera_fits_rejected() << '\n';
         }

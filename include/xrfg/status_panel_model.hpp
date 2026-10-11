@@ -121,6 +121,7 @@ enum class PanelBypass : std::uint8_t {
     quarantine,    // a second after the game's frames changed shape
     no_projection, // nothing to generate from: no eye images, or arming
     waiting_ahead, // the game's next wait is already with the runtime
+    no_synthesizer, // the method could not start (native DLSS FG unavailable)
     other,
 };
 

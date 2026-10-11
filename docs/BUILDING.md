@@ -1443,6 +1443,27 @@ configuration, native DLSS FG (`hitch_dlss_shift`): 50 of 777 and 5 of
 right before stalls included, so the extra held frame of the first build
 is gone.
 
+Bunched arrivals. On a game without a DLSS frame time the rule has only
+the arrival, and the first game of the Unreal batch to run on it in
+earnest showed the arrival's weakness: Hellblade II under UEVR on the
+Meta XR Simulator, 44 real and 44 generated a second on the presenter,
+took 78 skips in 60 seconds (release 31's layer), and of the 46 after
+its loading 39 were a long gap followed by a short one - 32 ms then 12,
+with a 22 ms median - frames that had arrived in a bunch and stepped
+evenly in content, each skip a repeated frame where nothing had hitched
+(the shown-rate line counted them: 1.0-1.1 "other" frames a second). A
+stall is different in just this respect: the pair after the late frame
+keeps its normal gap, since the engine resumed at its own pace. So the
+pair after a late arrival is now skipped only when its own gap is not
+short, under three quarters of the median, and the flight log writes
+`synthesis_pair` 779 (step, median, serial) for the pairs let through.
+The same run on this layer, 98 seconds: 29 skips (778) and 189 pairs let
+through (779); after loading, 19 and 144, the repeats down to 0.3 a
+second. The remaining skips follow gaps of 35 to 55 ms with the next gap
+at 18 to 26, which the arrival alone cannot tell from a stall. Games
+whose guides carry a frame time (777) are untouched; the forced-hitch
+recipe above runs on those.
+
 The feature's size, and the camera's motion at 67%. Per-eye features at
 67% with the camera off were clean on six of six forced hitch pairs
 (`hitch_pereye67_noskip`, `hitch_pereye67_b`) where 100% ghosted most, so
@@ -1465,6 +1486,37 @@ only until the cause is found; the replay cannot see it (whole-frame
 numbers put the camera's penalty at +0.5 at 100% and +0.4 at 67% on the
 same hitch triplets, and the rot1 turn triplets carry no camera motion at
 all), so the live recipe with crops is the instrument.
+
+The fit was measuring what was left over. The decision logs of those two
+67% runs (`XRFG_TEST_NATIVE_DLSSG_DECISIONS=1`) put it in plain sight:
+in the second (`hitch_cam1_67_fix`) the fit of one eye went 3.8 degrees,
+0.02, 3.8, 3.8, 0.04, 0.03, 3.8, 3.8 pair by pair, the turn and then
+nothing, and in the first (`hitch_cam1_67`) it flipped between 7.5 and
+3.9 degrees with residuals of 7 to 13 pixels where a still scene fits to
+0.07. The cause is in the order of the pack and the fit: the pack writes
+a pair's vectors less the camera flow of the pair before's fit (for NGX,
+with the matrices carrying that flow), and `FitNativeDlssGCamera` then
+read `Motion[g]` as written, so it fitted the motion left after the
+subtraction, and `poll_fits` handed that on as the camera's motion
+entire. A steady turn therefore alternated: a pair with no fit packed
+whole vectors and fitted the whole turn; the next subtracted it and
+fitted about nothing; the next subtracted nothing and fitted the turn
+again. On the pairs with the near-zero fit NGX got whole vectors with
+`cameraMotionIncluded` false and near-identity matrices, that is the
+camera-off reading of the scene, and in the first run, where the
+subtraction did not cancel (the 7.5 degree fits), the vectors handed on
+were wrong outright. `fit_point` now adds the same camera flow back, from
+`Depth[g]` and the pack's constants, before the point is fitted, so the
+fit measures the whole motion whatever the pack took out. The replay
+harness polls the generating pair's own fit after the record
+(`poll_camera_fits`; "replay native gpu fit handed" against "own"): on
+`hitch_cam1_67` seq1-7 the pair's own fit now equals the fit it was
+handed to three decimals (6.545 against 6.547 degrees, the translation
+and residual the same), at 67% and at 100% alike. The whole-frame error
+of the replay does not move, since each replayed pair takes the handed
+fit either way; what changes is every pair after the first in a live
+run. The 67% verdict above was taken with the alternating fit and is to
+be re-measured with the live recipe.
 
 A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
 the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the

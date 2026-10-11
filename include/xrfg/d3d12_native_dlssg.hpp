@@ -82,6 +82,9 @@ class D3D12NativeDlssG final {
         UINT inliers{}, points{};
     };
     [[nodiscard]] std::optional<CameraFit> last_camera_fit(UINT eye) const noexcept;
+    // Reads back the fits whose submissions have completed, as the next
+    // record would, so a test can see the last pair's own fit.
+    void poll_camera_fits() noexcept;
     // Fits accepted and refused since initialize.
     [[nodiscard]] std::uint64_t camera_fits_used() const noexcept;
     [[nodiscard]] std::uint64_t camera_fits_rejected() const noexcept;

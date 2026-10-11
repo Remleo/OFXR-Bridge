@@ -429,6 +429,19 @@ bool fit_point(uint index, out float3 b, out float2 target) {
     b = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
                lerp(TargetTangents.z, TargetTangents.w, uv.y), -1) * z;
     target = uv + m;
+    // The pack wrote this vector less the camera's flow of the pair before's
+    // fit, for NGX. The fit measures the whole motion - the next pair takes
+    // its result as the camera's motion entire - so that flow goes back in,
+    // from the same depth and constants the pack took it out with. Fitting
+    // the vectors as packed measured the motion left over instead, which
+    // live alternated pair by pair between the whole turn and nothing.
+    if (CameraRotation.w != 0) {
+        const float zc = DepthToZA / max(d * DepthToZBC.x + DepthToZBC.y, 1e-7);
+        const float3 b_point = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
+                                      lerp(TargetTangents.z, TargetTangents.w, uv.y), -1) * zc;
+        const float3 a_point = rotate(b_point, CameraRotation) + CameraMove;
+        target += source_uv(a_point, TargetTangents) - uv;
+    }
     return all(isfinite(m)) && all(abs(m) <= 1) && isfinite(d);
 }
 

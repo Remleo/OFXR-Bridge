@@ -240,6 +240,8 @@ enum class Engine {
     case PanelBypass::quarantine: return "Holding off for a second: the game's frames changed";
     case PanelBypass::no_projection: return "Nothing to generate from: no eye images in the frame";
     case PanelBypass::waiting_ahead: return "Passing frames through: the game waits ahead";
+    case PanelBypass::no_synthesizer:
+        return "This method could not start here: pick another on the Method row";
     default: return "Waiting for frames to generate from";
     }
 }

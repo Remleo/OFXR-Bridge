@@ -127,11 +127,22 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   (the one that doubles: a stall during a frame shows in the next frame's
   step), and otherwise the frames' arrival, taken one pair later for the
   same reason. `XRFG_HITCH_SKIP=0` in the game's environment turns it off
-  (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check). **DLSS
-  Frame Generation camera motion** is for 100% only: at 67% it leaves the
-  character translucent on ordinary turns wherever a busy background is
-  behind her (a feature per eye at 67% without the camera is fine, and the
-  camera at 100% is fine), and why is not yet understood.
+  (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check). A pair
+  after a late arrival is left alone when its own gap is short: frames
+  arriving in a bunch (a long gap, then a short one making up for it)
+  stepped evenly in content, and Hellblade II at 44 frames a second on the
+  simulator was getting a repeated frame for most of them. **DLSS Frame
+  Generation camera motion** had its fit reading the vectors it had just
+  corrected: the pack writes a pair's vectors less the camera flow of the
+  pair before's fit, the fit measured those, and what it handed on was the
+  motion left over, so live the fit alternated pair by pair between the
+  whole turn and nothing (3.8 degrees, 0.02, 3.8, 3.8, 0.04 in a 67%
+  decision log). The fit now puts that flow back before fitting; replayed,
+  a pair's own fit matches the one it was handed to three decimals. The
+  67% ghosting on ordinary turns recorded before this (the character
+  translucent wherever a busy background was behind her) was measured with
+  the alternating fit and is to be re-measured; until then the option
+  stays for 100% only.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and
@@ -613,8 +624,16 @@ hybrid under a new key and ignores the old one.
 
   Skydance's BEHEMOTH quits on the simulator with or without the layer, UEVR
   cannot find Trepang2's back buffer on D3D11 or D3D12, and Clair Obscur:
-  Expedition 33 crashes under this UEVR build with or without the layer, so
-  none of the three was measured there.
+  Expedition 33 crashed under this UEVR build with or without the layer, so
+  none of the three was measured there that day. A later round with
+  native DLSS Frame Generation selected (2026-10-11, `-nohmd`): RoboCop,
+  Hellblade II and Clair Obscur (which ran this time) at 45 real and 45
+  generated a second on the presenter, no quarantine; Black Myth: Wukong
+  still compiling shaders at 15-17 frames a second; and Atomic Heart
+  generated nothing, since it initialises NGX before the layer loads and
+  its DLSS plugin's search path carries no `nvngx_dlssg.dll` (NGX answers
+  `0xBAD00004`, feature not found, to the layer's later question), which
+  is the documented no-fallback case - the panel now says so.
 
   Unity games ask for OpenXR 1.1 first, which SteamVR refuses, and then make
   their instance at 1.0; FlatOut does the same. Not generating, and not

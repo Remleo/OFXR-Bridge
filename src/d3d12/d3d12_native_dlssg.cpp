@@ -1393,6 +1393,11 @@ std::optional<D3D12NativeDlssG::CameraFit> D3D12NativeDlssG::last_camera_fit(UIN
     return std::nullopt;
 #endif
 }
+void D3D12NativeDlssG::poll_camera_fits() noexcept {
+#ifdef XRFG_NATIVE_DLSSG
+    if (impl_ && impl_->camera_motion) impl_->poll_fits();
+#endif
+}
 std::uint64_t D3D12NativeDlssG::camera_fits_used() const noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     return impl_ ? impl_->fits_used : 0;

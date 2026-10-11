@@ -4084,7 +4084,25 @@ struct D3D12FrameSynthesizer::Impl {
                     skip_now = hitch;
                     record = 777;
                 } else {
-                    skip_now = skip_next_pair;
+                    // Frames that arrive in a bunch - a long gap, then a
+                    // short one making up for it - stepped evenly in
+                    // content, while a stall leaves the pair after the
+                    // late frame its normal gap. So the pair after a late
+                    // arrival is skipped unless its own gap is short
+                    // (Hellblade II at 44 frames a second on the Meta XR
+                    // Simulator: 39 of 46 skips in play followed a long
+                    // gap with a short one, each a repeated frame where
+                    // the game had not hitched). 779 records the pair let
+                    // through.
+                    const bool bunched = median > 0.0F && step_ms < 0.75F * median;
+                    skip_now = skip_next_pair && !bunched;
+                    if (skip_next_pair && bunched) {
+                        bridge_flight_logger().event(
+                            BridgeFlightOperation::synthesis_pair, 779,
+                            static_cast<std::uint64_t>(step_ms * 1000.0F),
+                            static_cast<std::uint64_t>(median * 1000.0F),
+                            current_source.ticket.serial);
+                    }
                     skip_next_pair = hitch;
                     record = 778;
                 }
