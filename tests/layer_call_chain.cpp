@@ -2579,6 +2579,9 @@ int main(int argc, char** argv) {
     g_inline_promise_mode =
         argc == 4 && std::strcmp(argv[3], "inline-promise") == 0;
     SetEnvironmentVariableA("XRFG_TEST_INLINE_PROMISE", g_inline_promise_mode ? "1" : "0");
+    // The call chain counts every pair; its frames run in a millisecond with
+    // sleeps between, which the hitch rule would read as hitches.
+    SetEnvironmentVariableA("XRFG_HITCH_SKIP", "0");
     g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
         g_refuse_layer_mode || g_own_display_time_mode || g_promise_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);

@@ -34,6 +34,7 @@
 #include "synthesize_midpoint_pixel_shader.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -801,6 +802,9 @@ struct D3D12FrameSynthesizer::Impl {
     struct RollingSource {
         D3D12HistoryCaptureTicket ticket{};
         D3D12HistoryConsumerLease lease{};
+        // When the frame was taken into the synthesizer: the game's cadence,
+        // for the hitch rule in record_pair.
+        std::chrono::steady_clock::time_point captured_at{};
         ComPtr<ID3D12Resource> resource;
         ComPtr<ID3D12Fence> producer_fence;
         std::array<D3D12ReprojectionView, kMaxReprojectionViews> views{};
@@ -815,6 +819,7 @@ struct D3D12FrameSynthesizer::Impl {
         void clear() noexcept {
             ticket = {};
             lease = {};
+            captured_at = {};
             resource.Reset();
             producer_fence.Reset();
             views = {};
@@ -972,6 +977,68 @@ struct D3D12FrameSynthesizer::Impl {
     D3D12NvidiaOpticalFlowOptions nvidia_options{};
     std::unique_ptr<D3D12NativeDlssG> native_dlss;
     bool native_pair_generated{};
+    // The last pair was shown as its real frame by the hitch rule below.
+    bool pair_repeated{};
+    // The hitch rule, for every method: the last eight pairs' frame times
+    // (from the sources' arrival), the median they give, and the pairs it
+    // has shown as their real frame. XRFG_HITCH_SKIP=0 turns it off.
+    std::array<float, 8> pair_frame_times{};
+    UINT pair_frame_times_count{}, pair_frame_times_next{};
+    std::uint64_t hitch_skips{};
+    [[nodiscard]] static bool hitch_skip_enabled() noexcept {
+        static const bool enabled = [] {
+            wchar_t value[8]{};
+            return !(GetEnvironmentVariableW(L"XRFG_HITCH_SKIP", value, 8) > 0 && value[0] == L'0');
+        }();
+        return enabled;
+    }
+    [[nodiscard]] float pair_frame_time_median() const noexcept {
+        if (pair_frame_times_count == 0) return 0.0F;
+        std::array<float, 8> sorted = pair_frame_times;
+        std::sort(sorted.begin(), sorted.begin() + pair_frame_times_count);
+        return pair_frame_times_count % 2
+            ? sorted[pair_frame_times_count / 2]
+            : 0.5F * (sorted[pair_frame_times_count / 2 - 1] + sorted[pair_frame_times_count / 2]);
+    }
+    void note_pair_frame_time(float dt_ms) noexcept {
+        pair_frame_times[pair_frame_times_next] = dt_ms;
+        pair_frame_times_next = (pair_frame_times_next + 1) % UINT(pair_frame_times.size());
+        pair_frame_times_count = std::min(pair_frame_times_count + 1, UINT(pair_frame_times.size()));
+    }
+
+    // The pair's synthetic slots show B, the real frame, and B goes to its
+    // current destination as usual: nothing is synthesised and no time is
+    // reported, as for a pair native generation skips.
+    [[nodiscard]] HRESULT record_repeat_pair(
+        WorkSlot& slot,
+        const RollingSource& current_source,
+        std::uint32_t synthetic_destination_index,
+        std::uint32_t current_destination_index,
+        bool* used_game_motion) noexcept {
+        auto* b = current_source.resource.Get();
+        const auto copy = [&](ID3D12GraphicsCommandList* list, ID3D12Resource* destination) {
+            const std::array<D3D12_RESOURCE_BARRIER, 2> before{
+                transition_barrier(b, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition_barrier(destination, release_state, D3D12_RESOURCE_STATE_COPY_DEST)};
+            list->ResourceBarrier(2, before.data());
+            list->CopyResource(destination, b);
+            const std::array<D3D12_RESOURCE_BARRIER, 2> after{
+                transition_barrier(b, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+                transition_barrier(destination, D3D12_RESOURCE_STATE_COPY_DEST, release_state)};
+            list->ResourceBarrier(2, after.data());
+        };
+        for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            copy(slot.command_list.Get(), synthetic_destinations[
+                synthetic_output_destination(output, synthetic_destination_index)].resource.Get());
+        }
+        copy(slot.current_copy_command_list.Get(), current_destinations[current_destination_index].resource.Get());
+        if (slot.synthesis_command_list) {
+            const HRESULT closed = slot.synthesis_command_list->Close();
+            if (FAILED(closed)) return closed;
+        }
+        *used_game_motion = true; // execute the direct list, bypass OFA
+        return S_OK;
+    }
     bool synthesis_enabled{};
     bool completion_unknown{};
     bool ffx_context_created{};
@@ -2783,6 +2850,7 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
         output_source->ticket = ticket;
+        output_source->captured_at = std::chrono::steady_clock::now();
         output_source->resource.Attach(raw_resource);
         output_source->producer_fence.Attach(raw_fence);
         output_source->view_count = static_cast<UINT>(source_views.size());
@@ -3960,6 +4028,42 @@ struct D3D12FrameSynthesizer::Impl {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
         slot.timing_span_only = backend != D3D12OpticalFlowBackend::nvidia || native_dlss;
+        pair_repeated = false;
+        // A pair spanning a game hitch is shown as its real frame, whatever
+        // the method. At a doubled step every method ghosts a third-person
+        // character: native DLSS FG leaves her half-transparent (see
+        // D3D12NativeDlssG's own rule, which reads DLSS's frame time), and
+        // OFXR's hybrid, live in Stellar Blade under the same forced hitches,
+        // drew two half-transparent copies of her side by side, at A's and
+        // B's places, body and all. The pair's frame time here is the time
+        // between the two frames' arrival in the synthesizer, against the
+        // median of the eight pairs before, so the flow-only methods are
+        // covered too; over 1.55 times the median, and at least six
+        // milliseconds over it - under half a display period no doubled
+        // step can show, and a menu at two hundred frames a second jitters
+        // by more than its ratio - the real frame it is. One repeated frame
+        // where the game hitched anyway.
+        if (hitch_skip_enabled() &&
+            previous_source.captured_at != std::chrono::steady_clock::time_point{} &&
+            current_source.captured_at > previous_source.captured_at) {
+            const float dt_ms = std::chrono::duration<float, std::milli>(
+                current_source.captured_at - previous_source.captured_at).count();
+            const float median = pair_frame_times_count >= 4 ? pair_frame_time_median() : 0.0F;
+            note_pair_frame_time(dt_ms);
+            if (median > 0.0F && dt_ms > 1.55F * median && dt_ms - median >= 6.0F) {
+                ++hitch_skips;
+                pair_repeated = true;
+                // 777 on synthesis_pair: a the pair's frame time in
+                // microseconds, b the median, c the frame's serial.
+                bridge_flight_logger().event(
+                    BridgeFlightOperation::synthesis_pair, 777,
+                    static_cast<std::uint64_t>(dt_ms * 1000.0F),
+                    static_cast<std::uint64_t>(median * 1000.0F),
+                    current_source.ticket.serial);
+                return record_repeat_pair(slot, current_source, synthetic_destination_index,
+                    current_destination_index, used_game_motion);
+            }
+        }
         if (native_dlss) {
             native_pair_generated = false;
             if (nvidia_gpu_timing_enabled) {
@@ -5366,8 +5470,10 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->synthetic_destination_index = synthetic_destination_index;
         output_ticket->current_destination_index = current_destination_index;
         // A skipped native pair copied B into its outputs.
-        output_ticket->synthetics_in_target_camera = !native_dlss || native_pair_generated;
-        output_ticket->synthetics_repeat_current = native_dlss && !native_pair_generated;
+        // A pair the hitch rule showed as its real frame is a repeat too,
+        // whatever the method: the layer counts it as one.
+        output_ticket->synthetics_in_target_camera = !pair_repeated && (!native_dlss || native_pair_generated);
+        output_ticket->synthetics_repeat_current = pair_repeated || (native_dlss && !native_pair_generated);
         return S_OK;
     }
 

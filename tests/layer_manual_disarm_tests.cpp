@@ -43,6 +43,9 @@ struct FinishedEarly {};
 int main(int argc, char** argv) {
     if (argc < 3 || argc > 6) return 1;
     const std::string mode = argv[2];
+    // These runs count pairs and switches; a frame rate shaped by Sleep
+    // must not read as hitches to the synthesizer's rule.
+    SetEnvironmentVariableA("XRFG_HITCH_SKIP", "0");
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";

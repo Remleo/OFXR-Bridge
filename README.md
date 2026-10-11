@@ -111,20 +111,23 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   pair before's by more than a third (a game hitch, a loading stall) goes
   without it, as if the option were off, rather than with a motion that no
   longer fits; within a third the fit is scaled by the ratio.
-- **A pair spanning a game hitch is shown as its real frame.** At a
-  doubled step - a 50 ms frame between 27 ms ones - NGX leaves a
-  third-person character half-transparent for the generated frame, with
-  a busy object showing through her. Measured live in Stellar Blade with
-  forced hitches, it is NGX at that step size: the game's own DLSS-G
-  library (310.1.0) and the newer one (310.9.1) both show it on a share of
-  such pairs, the shared side-by-side feature less often than a feature
-  per eye, and no setting removes it. So native generation now skips a
-  pair whose frame time runs over 1.55 times the median of the eight
-  before it and shows the real frame instead: one repeated frame where the
-  game hitched anyway, in place of a ghost. `XRFG_NATIVE_DLSSG_HITCH_SKIP=0`
-  in the game's environment turns it off. Leave **DLSS Frame Generation
-  camera motion** off for such games; its feature per eye ghosts more of
-  these pairs.
+- **A pair spanning a game hitch is shown as its real frame, whatever
+  the method.** At a doubled step - a 50 ms frame between 27 ms ones -
+  every method ghosts a third-person character. Measured live in Stellar
+  Blade with forced hitches (the process suspended 25 ms three times in a
+  capture): NGX leaves her half-transparent with a busy object showing
+  through, with the game's own DLSS-G library (310.1.0) and the newer one
+  (310.9.1) alike, the shared side-by-side feature less often than a
+  feature per eye; OFXR's hybrid draws two half-transparent copies of her
+  side by side, body and all. No setting removes it. So a pair whose frame
+  time runs over 1.55 times the median of the eight before it is not
+  generated: the real frame is shown instead, one repeated frame where the
+  game hitched anyway; a step under six milliseconds over the median is
+  left alone. `XRFG_HITCH_SKIP=0` in the game's environment turns
+  it off (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check,
+  which reads DLSS's frame time). Leave **DLSS Frame Generation camera
+  motion** off for such games; its feature per eye ghosts more of these
+  pairs.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and

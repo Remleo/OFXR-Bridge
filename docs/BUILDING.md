@@ -1399,6 +1399,27 @@ pair is generated as before, the generated frame halfway between its
 neighbours - a 37.1 ms pair at 1.4 times included, and the 16.7 ms pairs
 right after a hitch, solid.
 
+OFXR's own methods want the same rule, and more. The hybrid (FidelityFX's
+flow with the game's vectors, the deeper pipeline, 2X) under the same wide
+forced-hitch recipe (`hitch_ofxr_hybrid`): on two 50 ms pairs (the booth
+and car behind her, and side-on) two half-transparent copies of her side
+by side, at A's and B's places, body included - a full double image
+rather than a translucent face - and the booth sweeping past the camera on
+a third is a mess. So the rule now sits in the frame synthesizer's
+`record_pair`, ahead of every method: the pair's frame time is the time
+between the two frames' arrival in the synthesizer (`RollingSource::
+captured_at`, set when the source is acquired, so the flow-only methods
+are covered without a DLSS guide), against the median of the eight pairs
+before, and over 1.55 times it and at least six milliseconds over it (under
+half a display period no doubled step can show, and a two-hundred-frame
+menu jitters by more than its ratio) the pair's synthetic slots are filled
+with B and B goes to its current destination as usual (`record_repeat_pair`,
+the native path's skipped-pair ending factored out); the flight log
+writes `synthesis_pair` 777 with the pair's time, the median and the
+serial. `XRFG_HITCH_SKIP=0` turns it off; the native path's own check on
+DLSS's frame time stays behind it as a second line. The confirmation is
+the same wide recipe on the hybrid.
+
 A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
 the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the
 dumps in `%LOCALAPPDATA%\CrashDumps`: `std::terminate` inside the
