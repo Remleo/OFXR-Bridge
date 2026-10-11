@@ -110,7 +110,17 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   reaches NGX a pair late, so a pair whose frame time differs from the
   pair before's by more than a third (a game hitch, a loading stall) goes
   without it, as if the option were off, rather than with a motion that no
-  longer fits; within a third the fit is scaled by the ratio.
+  longer fits; within a third the fit is scaled by the ratio. On such a
+  hitch pair, while a busy object passes behind the character, the one
+  generated frame can still ghost her (half-transparent, the car showing
+  through); the pairs around it are clean. It is not the game's DLSS Frame
+  Generation library: Stellar Blade ships `nvngx_dlssg.dll` 310.1.0 and
+  keeps it (a game that loads NGX before the layer uses its own copy), and
+  a replay of the pair through 310.9.1 was clean, but live hitch pairs with
+  310.9.1 in the game's folder ghost the same way. What differs on a dropped
+  pair is NGX's input - object-only vectors with the camera's matrices on
+  the pairs before it, full vectors with an identity camera on the hitch
+  pair - and that switch is under test.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and

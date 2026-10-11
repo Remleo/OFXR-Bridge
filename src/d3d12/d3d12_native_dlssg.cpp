@@ -561,6 +561,12 @@ struct D3D12NativeDlssG::Impl {
     std::array<std::optional<CameraMotion>, 2> fitted{};
     // The motion each eye's pack took out this pair, for its evaluation.
     std::array<std::optional<std::array<float, 7>>, 2> pair_rigid{};
+    // This call's features take the camera's motion out of their vectors
+    // (camera_motion, and not the shared-stereo feature): NGX is then told
+    // on every evaluation that the vectors are the objects' own, with the
+    // camera's motion in the matrices where a pair has a fit and the
+    // identity where it has none.
+    bool split_pairs{};
     // A fit's result on its way back: a buffer per eye the fit writes, one
     // staging buffer both are copied into, and the fence of the submission.
     struct FitReadback {
@@ -1098,7 +1104,18 @@ struct D3D12NativeDlssG::Impl {
         matrix(o.clipToPrevClip, XMMatrixIdentity());
         matrix(o.prevClipToClip, XMMatrixIdentity());
         // The camera's motion this pair's pack took out of the vectors: a
-        // test's matrix if it gave one, else from the motion itself.
+        // test's matrix if it gave one, else from the motion itself. A pair
+        // without a fit - the reseed, the first pair, a hitch pair whose fit
+        // was dropped - keeps the identity, with the flag below unchanged:
+        // whole vectors and no camera motion say the same thing as split
+        // vectors and the camera's, and the flag flipping between the two
+        // readings on a hitch pair, between split pairs, is what NGX
+        // mishandled. Live in Stellar Blade (2X, 100%, three 25 ms
+        // suspensions of the process forcing five 50 ms pairs) the two
+        // hitch pairs with a car passing behind the character's head left
+        // her face translucent with the camera on and the flag flipped,
+        // where with the camera off throughout the same pairs kept her
+        // opaque; the library (310.1.0 or 310.9.1) made no difference.
         const bool object_motion = !reset && eye < pair_rigid.size() && pair_rigid[eye].has_value();
         if (object_motion) {
             const XMMATRIX motion = eye < test_motion.size() && test_motion[eye]
@@ -1129,9 +1146,11 @@ struct D3D12NativeDlssG::Impl {
         o.cameraFOV = b.fov.angle_up - b.fov.angle_down;
         o.cameraAspectRatio = float(p.extent[0]) / p.extent[1];
         o.depthInverted = gb.depth_inverted;
-        // With a camera motion the pack has taken the camera's own flow out
-        // of the vectors, and NGX is told so.
-        o.cameraMotionIncluded = !object_motion;
+        // With the camera's motion in use the pack has taken the camera's
+        // own flow out of the vectors, and NGX is told so - on every
+        // evaluation of such a feature, the pairs without a fit included
+        // (split_pairs), so that the reading never flips mid-stream.
+        o.cameraMotionIncluded = !split_pairs;
         o.motionVectorsDilated = vectors_dilated; // false: NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
@@ -1616,6 +1635,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         };
         std::array<Params, 2> eye_params{};
         bool reseeded_pair = false;
+        p.split_pairs = p.camera_motion && !shared;
         for (UINT f = 0; f < feature_count; ++f) {
             auto &feature = p.features[f];
             const UINT first = shared ? 0 : f, last = shared ? 1 : f;

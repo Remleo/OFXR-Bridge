@@ -1306,6 +1306,59 @@ without a camera, so the dropped fit stays the conservative choice; the
 alternatives, repeating the real frame on such a pair (a stutter instead of
 a ghost) or scaling the fit, want a live sample before either is taken.
 
+The replay pointed at the library first, and the live test took that back.
+The exact live hitch pair (A frame 2, B frame 3, the right eye's head crop)
+replayed through each DLSS-G library in turn: with the game's own 310.1.0
+the dropped fit reproduces the live frame (1.2 to 1.7 mean difference on
+the crop; every other variant 2.6 to 6.2 away), and so does the camera off;
+with 310.9.1 the same pair with the fit dropped keeps her face whole. The
+ideal same-pair fit (7.20 degrees against 3.89 for the pair before, 1.85
+times, exactly the frame-time ratio) ghosts with either library, so scaling
+would be worse and the dropped fit stays. The two libraries score the same
+on 24 recorded turn triplets (12.17 and 12.17, 10.59 and 10.60). The layer
+cannot choose the library for the game - Stellar Blade initialises NGX
+before the layer loads (`ngx_core_already_loaded`, no `ngx_discovery_paths`
+in its capture log), so the game's own path list decides, and the module
+its process held was
+`SB\Plugins\Runtime\Nvidia\Streamline\Binaries\ThirdParty\Win64\nvngx_dlssg.dll`,
+310.1.0 as shipped - so 310.9.1 was copied over it for a live run (the
+demo's folder is back as shipped since; the copies are under
+`build/captures/sb/dlssg_backup`). Live at 2X with 100% and the camera, four
+full-stick orbits and 25 pairs were clean at 39 to 40 frames a second, but
+none had a 50 ms hitch; a 12-frame capture with three 25 ms suspensions of
+the process injected (`build/captures/sb/r27_2x_hitchlive`) gave five 50 ms
+pairs, and two of them - the two where the car passes behind her head -
+ghost exactly as the original did, her face translucent and in one a
+doubled outline, while the three with her facing the camera are clean. The
+library is not the fix. The replay misled because with `FIT_PREVIOUS` the
+seeding pair is evaluated without a fit, so NGX's history in the replay
+never held the camera split; live, the pairs before a hitch are split
+(object-only vectors, camera matrices) and the hitch pair switches to full
+vectors with an identity camera. The hypothesis under test is that this
+switch on a dropped pair is what NGX mishandles, and the live hitch run
+with the camera off throughout (`XRFG_NATIVE_DLSSG_CAMERA=0` through the
+launcher's `-GameEnv`, same library, same injected stalls,
+`build/captures/sb/hitchlive_cam0`) bore it out: four hitch pairs, her face
+opaque in every one, the one with the phone booth and the car right behind
+her head included; what remains is the car's smear and doubling around her
+silhouette, disocclusion at a doubled step, with nothing showing through
+her. The same with the game's own 310.1.0 and the camera off from the ini,
+the user's configuration now (`build/captures/sb/hitchlive_cam0_orig`): five
+hitch pairs from 44.6 to 50 ms, one of them a 45.5 ms frame after a 16.7
+(ratio 2.7), and her head, hair and body solid on every one, the extreme
+pair with a faint copy of her hair ornament beside her head and a
+background sign doubling a little on another. So the library does not
+matter at all, and the dropped-fit pair's flip of `cameraMotionIncluded`
+is the fault.
+The fix keeps the flag steady: a feature that takes the camera's motion out
+of its vectors tells NGX on every evaluation that the vectors are the
+objects' own (`split_pairs`), with the camera's motion in the matrices
+where the pair has a fit and the identity where it has none - whole
+vectors and no camera motion say the same thing as split vectors and the
+camera's, so a hitch pair, a reseed and the first pair now read the same
+way as the pairs around them. Until it is confirmed live by the same
+injected-stall capture, the user's tray runs with the camera off.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:
