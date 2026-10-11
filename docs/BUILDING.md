@@ -1562,7 +1562,21 @@ session this rule would promote on the inline path; log pid 66048, scale
 1.9): 3X at 12.7 s by the frame's-own-time rule (interval 3.09 periods,
 0.79 of slack, the frame 2.30), 2X back at 17.0 s with c=4 once the 3X
 interval had run a slot over, and 2X held with the latch through the 44 s
-watched, the interval back at 3.00 periods. Since the forwarded
+watched, the interval back at 3.00 periods.
+
+The six native games of the earlier round were run again on the Meta XR
+Simulator at 90 Hz with the rule in (OFXR hybrid, Automatic on, 2064x2208
+a side): Hubris, Kayak VR, Moss Book II, Moss, RoboQuest VR and FlatOut 4
+VR. The five Unreal titles have a split frame loop (600) and had the
+presenter already through the pipelined-wait promotion, so the rule did
+not touch them (602 without a 601), and they ran as before, 45 real and 45
+generated a second with no repeat and no quarantine (a first Hubris pass
+read 35.7 while another session's CPU work ran beside it; alone, 44.9 at
+2.00 periods). FlatOut 4 VR, a single-thread loop on the D3D11 bridge, is
+the one the rule reached: inline in the earlier round at 28.4 game frames
+a second with its pairs bunched (`last 10 s (inline)`), it now asks for the
+presenter on its first generating frame (601, then 602) and runs 44.9 +
+44.9 a second, 14 repeats in a minute, no quarantine. Since the forwarded
 wait can overlap a render thread's work in a pipelined game, room to spare
 inline also needs
 the xrEndFrame thread's CPU share of its wall time (`GetThreadTimes` a
