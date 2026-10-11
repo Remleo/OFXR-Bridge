@@ -1356,6 +1356,29 @@ stretches dropped frames, and dropped frames are what make SteamVR halve the
 rate. That is the trade the tray's option already offers, so the option stays
 as it is, on by default.
 
+#### djules75's 0.2.13.2 fixes, brought in
+
+Release 26 cherry-picks djules75's V439 to V443 as their own commits: no
+prime hold on SteamVR (`presenter_holds_primes`), the D3D11 bridge's release
+run at the game's xrEndFrame (`SwapchainState::pending_bridge_release`,
+`release_pending_bridge_images`), a history capture that waits up to a
+display period for a busy slot (`D3D12HistoryCaptureWait`,
+`history_capture_wait`), Virtual Desktop's presenter given back past the
+split-loop latch (`presenter_restore_after_bypass`), and the overlay-swapchain
+test of the quarantine this fork had already removed. One adaptation: with
+the release deferred, both eyes' releases run after both eyes' DLSS
+evaluations are published, so "the evaluation released with the image"
+(release 15's per-eye pairing) could take the other eye's; the publication
+count is read at the game's release (`pending_bridge_release_publication`)
+and handed to `release_swapchain_image_locked`, which uses it for the
+resolve and for `eye_release_publication`. Their version bumps are not
+taken: this fork stays V439, the runtime folder's name. Checked: 113 of 113
+tests; on the Meta XR Simulator hello_xr on the D3D11 bridge (1628 deferred
+releases a swapchain, generation at 2X, no history waits), hello_xr D3D12
+with the panel, and Lies of P under UEVR (D3D12, 1349 DLSS evaluations in
+1362 frames). A D3D11 game with a swapchain per eye and DLSS, the case the
+adaptation is for, was not at hand.
+
 #### Extrapolation in Stellar Blade: pacing, placement and prediction
 
 A report of "a lot of stuttering and ghosting" in the ASW-like mode (a 120
