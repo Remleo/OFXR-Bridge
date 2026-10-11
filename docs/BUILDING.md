@@ -1356,6 +1356,45 @@ stretches dropped frames, and dropped frames are what make SteamVR halve the
 rate. That is the trade the tray's option already offers, so the option stays
 as it is, on by default.
 
+#### Extrapolation in Stellar Blade: pacing, placement and prediction
+
+A report of "a lot of stuttering and ghosting" in the ASW-like mode (a 120
+Hz Steam Frame, Stellar Blade, FidelityFX + extrapolate + 3X) was taken to
+the OpenXR Simulator at 90 Hz, 2644x2644 per eye, the same steady orbit in
+the rain-city area, the flight recorder on (log pid 35584, captures
+`build/captures/sb/extrap_2x` and `extrap_3x`). What the headset was shown,
+period by period, from `presenter_content` (scratchpad `stutter.py`), and
+where each synthetic was placed (`mode_score.py extrap`, with the period as
+a parameter):
+
+| | 2X | 3X |
+|---|---|---|
+| Game frames a second (the layer paces the game to refresh / frames) | 44.8 | 29.2 |
+| Display periods per game frame | 2 on 99.2% | 3 on 99.9% |
+| Repeats | 0.4% | 2.6%, all in one 1.3 s capture stall |
+| Synthesis fraction, median | 1.499 | 1.667 |
+| Placement error against the rate, fixed share / layer | 0.002 / 0.017 | 0.003 / 0.015 |
+
+Phase correlation on the captures (eye 0, whole frame): at 2X the real
+frames move 18 pixels a step and the generated frame sits 22 pixels on from
+the real frame before it, where 27 would be exact (one to five pixels
+short); at 3X the real frames move 38 and the captured second synthetic sits
+62 to 64 on, where 63 is exact. Full-resolution crops of the character and
+the phone sign show no doubling in either. So the mode paces and places as
+designed where the game holds the rate. It cannot where the game does not:
+extrapolation turns the deeper pipeline off, so a late frame repeats at
+once, and on the 120 Hz headset 2X asks for 60 frames a second and 3X for
+40 from a game that gives 37 to 45. For comparison, the native 2X session on
+the simulator at 13:35 (36.8 frames a second on 90 Hz) repeated 16.5 frames
+a second, 44% of its game frames covering three periods. Replayed a whole
+frame ahead (`XRFG_TEST_REPLAY_EXTRAPOLATE=1`), the mesh from the game's
+vectors erred 9.85 on r24_turn (10.75 across its 50 ms hitch, 9.06 on even
+pairs) and 8.18 on user_rot5, against the interpolating hybrid's 6.87 and
+8.20 and repeating the frame's 17.4 and 21.2: the prediction's own error is
+not what the report describes. An automatic multiplier, 3X when the game is
+under half the refresh rate, would remove most of the repeats; it is not
+built.
+
 #### Meta's mesh warps, measured
 
 The warps were drawn in the synthesizer as Meta draws them: a grid over each

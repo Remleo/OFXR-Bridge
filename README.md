@@ -306,6 +306,21 @@ does.
   The prediction shown after it is made for its own display time, so every
   frame on screen is that much fresher. (SteamVR's own lead from its wait to
   the display is 35.3 ms there; the rest is the game rendering.)
+- **It needs the game at the rate the multiplier asks for, and gives it no
+  slack.** Extrapolation turns the deeper pipeline off, since its point is
+  latency, so every game frame must be ready within its share of the
+  refresh: 2X wants the game at half the refresh rate and 3X at a third,
+  and a frame that is late repeats. The layer paces the game to that rate.
+  In Stellar Blade on the OpenXR Simulator at 90 Hz, 2X ran the game at 45
+  frames a second and 3X at 30, with every game frame covering exactly two
+  and three display periods (0.4% and 0 repeats), and the predicted frames
+  landed within 1 to 5 pixels of where the next real frame put the scene,
+  the character and the background intact. On a 120 Hz Steam Frame the same
+  game at 37 to 45 frames a second cannot keep 2X's 60 and keeps 3X's 40
+  only part of the time: the repeats read as stutter, and each repeated
+  prediction as a double. Choose 3X there, or 90 Hz, or settings that hold
+  40; interpolation with **Prefer FPS over latency** tolerates a late frame
+  that extrapolation cannot.
 - It costs 0.16 ms a pair offline at 3004x3004 per eye and 0.17 ms live in
   Galactic Racer, cheaper than any interpolating method; native generation at
   67% took 1.59-1.63 ms in the same rounds. From FidelityFX's flow it costs
