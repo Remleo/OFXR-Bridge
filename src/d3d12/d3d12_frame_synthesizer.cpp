@@ -367,13 +367,15 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
 // rather than silently meaning something else.
 // Test only (XRFG_TEST_HYBRID_VARIANT=1..3): a variant of the hybrid's choice
 // between its vectors and flow branches, carried in SynthesisFlags bits 5-6
-// for the replay to A/B on recorded pairs. 0 is the shipped rule.
+// for the replay to A/B on recorded pairs; 8 (bit 24) returns the vectors
+// path's vector map instead of colour. 0 is the shipped rule. Bits 24-31
+// survive the fraction re-pack.
 [[nodiscard]] UINT hybrid_variant_flags() noexcept {
     static const UINT bits = [] {
         char buffer[8]{};
         const DWORD n = GetEnvironmentVariableA("XRFG_TEST_HYBRID_VARIANT", buffer, sizeof(buffer));
         const UINT v = (n > 0 && n < sizeof(buffer)) ? static_cast<UINT>(std::atoi(buffer)) : 0U;
-        return (v & 3U) << 5U;
+        return ((v & 3U) << 5U) | (((v >> 3U) & 1U) << 24U);
     }();
     return bits;
 }
@@ -3202,7 +3204,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
             // Extrapolation packs how far past the current capture, halved.
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(nvidia_options.extrapolate
                     ? (synthetic_output_fraction(output) - 1.0F) * 0.5F
                     : synthetic_output_fraction(output));
@@ -3842,7 +3844,7 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
@@ -4451,7 +4453,7 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(nvidia_options.extrapolate
                     ? (synthetic_output_fraction(output) - 1.0F) * 0.5F
                     : synthetic_output_fraction(output));
@@ -4726,7 +4728,7 @@ struct D3D12FrameSynthesizer::Impl {
         const D3D12_CPU_DESCRIPTOR_HANDLE rtv_start =
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
-            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
+            parameters.synthesis_flags = (parameters.synthesis_flags & 0xFF0000FFU) |
                 packed_synthesis_fraction(synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *

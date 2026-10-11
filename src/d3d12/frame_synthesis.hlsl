@@ -667,6 +667,12 @@ float2 forward_flow_for_pixel(
 // travels 16 bits a value in UseGameMotion (x, y) and GameMotionPadding
 // (width, height).
 static bool hybrid_layout = false;
+// Test only (XRFG_TEST_HYBRID_VARIANT=8): the hybrid returns, instead of
+// colour, each pixel's solved B-to-A vector from the vectors path (red and
+// green, half a unit = 0, 1024 target pixels across the range) and whether
+// its endpoints were valid (blue), for the replay to read back.
+static bool hybrid_vector_map = false;
+static float3 vector_map_color = float3(1.0, 1.0, 1.0);
 // The extrapolation from both the vectors and the flow: the flow keeps its
 // constants, so the depth rectangle travels in the other view's mapping, and
 // each pass scores its point against A. The vectors-only entry point shares
@@ -850,6 +856,34 @@ bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
     return found;
 }
 
+// Another surface in front of the pixel at the generated instant: a solve
+// from a start on a surface other than the one whose vector is `here`, kept
+// when its A and B samples agree, that is when it is visible in both frames
+// and so in front. Looked for from at most two starts, nearest first.
+bool find_front_surface(float2 pixel, float2 here, out float4 color) {
+    color = float4(0.0, 0.0, 0.0, 1.0);
+    uint solves = 0;
+    bool done = false;
+    [loop] for (uint radius_index = 0; radius_index < 4 && !done; ++radius_index) {
+        float radius = 4.0 * float(1u << radius_index);
+        [loop] for (uint direction = 0; direction < 8 && !done; ++direction) {
+            float angle = float(direction) * 0.78539816;
+            float2 start = pixel + radius * float2(cos(angle), sin(angle));
+            if (length(game_motion_texel(start) - here) > 1.0) {
+                float4 a, b;
+                ++solves;
+                if (game_motion_surface(pixel, start, a, b) &&
+                    rgb_error(a, b) < 0.05) {
+                    color = saturate(lerp(a, b, synthesis_fraction()));
+                    return true;
+                }
+                done = solves >= 2;
+            }
+        }
+    }
+    return false;
+}
+
 float4 synthesize_midpoint(
     FullscreenVertex input,
     float flow_value_scale,
@@ -980,6 +1014,9 @@ float4 synthesize_midpoint(
                         Slice,
                         ViewIndex);
                 }
+                if (use_game_motion_pipeline) vector_map_color = endpoints_valid
+                    ? float3(saturate(0.5 + raw_backward.x / 1024.0), saturate(0.5 + raw_backward.y / 1024.0), 1.0)
+                    : float3(0.0, 0.0, 0.0);
                 if (endpoints_valid) {
                     if (previous_sample.valid >= 0.5 && current_sample.valid >= 0.5) {
                     float4 flow_midpoint = lerp(
@@ -1064,10 +1101,26 @@ float4 synthesize_midpoint(
                             CameraSample covered = sample_previous_target(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
                             if (covered.valid >= 0.5) output_color = saturate(covered.color);
-                        } else if (disagreement > 0.1 && repeated_capture_flag() == 0) {
+                            // Unless the covering surface is already over this pixel
+                            // at the generated instant: its leading edge has come half
+                            // the way. A surface found visible in both frames is in
+                            // front; without this, a close character under a turning
+                            // camera lost half the band along her leading edge to the
+                            // background behind her (Stellar Blade, her head's error
+                            // 7.21 to 7.04 on the worst pair, 6.71 to 6.61 over four).
+                            float4 front_covered;
+                            if (repeated_capture_flag() == 0 &&
+                                find_front_surface(pixel,
+                                    game_motion_texel(pixel - (1.0 - synthesis_fraction()) * last_displacement),
+                                    front_covered)) {
+                                output_color = front_covered;
+                            }
+                        } else if (disagreement > 0.05 && repeated_capture_flag() == 0) {
                             // Where the motion is not uniform - a vector 16
                             // pixels away differs by a tenth of a pixel -
-                            // disagreeing samples are two surfaces instead. A's
+                            // disagreeing samples are two surfaces instead
+                            // (from a twentieth of the range: a tenth left a
+                            // halo on a dark character against a dark car). A's
                             // is usually hidden behind what B shows, background
                             // a trailing edge uncovers, so B's warped sample
                             // stands in. On recorded game frames the tenth beat
@@ -1093,25 +1146,9 @@ float4 synthesize_midpoint(
                             // one whose own A and B samples agree is visible in
                             // both frames, so in front. It is looked for from at
                             // most two starts on another surface, nearest first.
-                            uint solves = 0;
-                            bool done = !motion_edge;
-                            [loop] for (uint radius_index = 0; radius_index < 4 && !done; ++radius_index) {
-                                float radius = 4.0 * float(1u << radius_index);
-                                [loop] for (uint direction = 0; direction < 8 && !done; ++direction) {
-                                    float angle = float(direction) * 0.78539816;
-                                    float2 start = pixel + radius * float2(cos(angle), sin(angle));
-                                    // A start on the same surface finds B's again.
-                                    if (length(game_motion_texel(start) - here) > 1.0) {
-                                        float4 a, b;
-                                        ++solves;
-                                        if (game_motion_surface(pixel, start, a, b) &&
-                                            rgb_error(a, b) < 0.05) {
-                                            output_color = saturate(lerp(a, b, synthesis_fraction()));
-                                            done = true;
-                                        }
-                                        done = done || solves >= 2;
-                                    }
-                                }
+                            float4 front;
+                            if (motion_edge && find_front_surface(pixel, here, front)) {
+                                output_color = front;
                             }
                         }
                     }
@@ -1453,7 +1490,10 @@ float4 ExtrapolateMeshFillPS(FullscreenVertex input) : SV_Target {
 // The vectors keep a tie.
 float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
+    hybrid_vector_map = ((SynthesisFlags >> 24u) & 1u) != 0u;
+    vector_map_color = float3(1.0, 1.0, 1.0);
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
+    [branch] if (hybrid_vector_map) return float4(vector_map_color, 1.0);
     float vectors_disagreement = last_disagreement;
     // Test variants of this choice (XRFG_TEST_HYBRID_VARIANT, bits 5-6): 1
     // asks the flow less often, 2 makes it win less easily, 3 leans on the

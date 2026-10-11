@@ -470,6 +470,10 @@ void replay_held_out(const std::filesystem::path& directory) {
     }
     const auto save = [&](const std::string& name, const xrfg::DumpedTexture& image) {
         if (!save_dir || box_left >= box_right) return;
+        const auto f = static_cast<DXGI_FORMAT>(image.format);
+        const bool bgra = f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8X8_UNORM ||
+            f == DXGI_FORMAT_B8G8R8A8_TYPELESS || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+            f == DXGI_FORMAT_B8G8R8X8_TYPELESS || f == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
         std::filesystem::create_directories(save_dir);
         std::string file = name;
         for (auto& c : file) if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
@@ -478,7 +482,8 @@ void replay_held_out(const std::filesystem::path& directory) {
         for (UINT y = box_top; y <= box_bottom; ++y)
             for (UINT x = box_left; x <= box_right; ++x) {
                 const auto c = replay_texel(image, box_slice, x, y);
-                for (UINT k = 0; k < 3; ++k) out.put(static_cast<char>(std::lround(std::clamp(c[k], 0.0F, 255.0F))));
+                // A BGRA capture reads back in its byte order; the file is RGB.
+                for (UINT k = 0; k < 3; ++k) out.put(static_cast<char>(std::lround(std::clamp(c[bgra ? 2 - k : k], 0.0F, 255.0F))));
             }
     };
     save("0 frame0", f0.colour);

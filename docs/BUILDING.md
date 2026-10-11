@@ -1687,6 +1687,39 @@ head in eye 1 (0.33,0.43 to 0.44,0.58):
 | Blend of the two frames | 10.82 | 11.93 |
 | The real frame repeated | 12.77 | 13.69 |
 
+Where the hybrid's error on her actually was. The error maps the replay
+saves (`XRFG_TEST_REPLAY_SAVE`, with `XRFG_TEST_REPLAY_SAVE_FULL=1`; the
+harness now writes BGRA captures with their channels in order, before
+that its PPMs had red and blue swapped) put the hybrid's extra error
+beside her, not on her: a halo on the car behind her silhouette, along
+the edge her motion leads with. A test switch that returns the vectors
+path's branch per pixel instead of colour (the vector map,
+`XRFG_TEST_HYBRID_VARIANT=8`, red and green the solved B-to-A vector,
+blue the endpoints' validity) read that band as the covered-background
+branch: the solve from the pixel alternates between her and the car and
+ends on the car's displacement, so A's sample of the car was shown, which
+is right for the half of the band her edge has not reached at the
+generated instant and wrong for the half it has. On her head in eye 1
+over four steady 24 ms pairs (`hitch_r32_user`, seq4 f2 and f3, seq7 f2
+and f3), native 100% scored 5.54. What was tried on the hybrid, as
+`XRFG_TEST_HYBRID_VARIANT` switches against the shipped rule's 6.71:
+
+| Change | Error over her head | Verdict |
+|---|---|---|
+| A vector refinement: the offset within two pixels, along the vector's line, that makes the blurred A and B samples agree best | 6.98 against 6.98 on three pairs | no effect, removed |
+| The two-surface branch from a disagreement of 0.05 instead of 0.1 | 6.67 | small, every pair better |
+| The other-surface solve accepting samples that agree within 0.1 instead of 0.05 | 6.71 | identical: that solve was not deciding those pixels |
+| The front-surface search (the same two-start solve, now `find_front_surface`) in the covered-background branch as well | 6.65, the worst pair 7.21 to 7.04 | every pair better |
+| Both kept changes | 6.61, whole-frame moving error 7.18 to 7.12 | shipped |
+| Both, with the search accepting 0.1 | 6.63 | looser is worse |
+
+The GPU cost did not move outside the replay's run-to-run noise (3 to 6
+ms for the pass either way): the search runs on the sixth of the band's
+pixels that reach that branch, two solves at most. The plain midpoint is
+still four fifths of her pixels at an error of 4.7, the same resampling
+and shading error native carries, so the gap that remains is in the
+band: a quarter of the hybrid's error there against native's.
+
 So the crops and the window agree: on her, native is six percent better
 than the hybrid, a sixth better than the vectors alone and a third better
 than the flows, while the whole-frame moving error had the vectors ahead

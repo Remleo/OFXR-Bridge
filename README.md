@@ -326,6 +326,12 @@ in Galactic Racer on a Steam Frame with the half-resolution flow), against
 1.81 ms for native generation at 67%. It takes the FidelityFX backend. With exact
 synthetic vectors it errs more than the vectors alone at occlusions, where
 their two samples must disagree and the flow can look the better explanation.
+Since release 34 its vectors branch also keeps a close character's leading
+edge: where its solve ends on the background that edge is covering, it looks
+for the covering surface too and shows it where it is visible in both frames,
+and it treats a smaller disagreement as two surfaces. On Stellar Blade's
+heroine under an orbiting camera that took her head's error from 6.71 to 6.61
+(native 5.54), the worst pair from 7.21 to 7.04.
 
 **Extrapolation, SpaceWarp-style.** Every interpolating method, NVIDIA's
 included, holds each real frame back a display period, to show a frame
