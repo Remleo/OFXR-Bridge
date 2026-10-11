@@ -117,10 +117,13 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   Generation library: Stellar Blade ships `nvngx_dlssg.dll` 310.1.0 and
   keeps it (a game that loads NGX before the layer uses its own copy), and
   a replay of the pair through 310.9.1 was clean, but live hitch pairs with
-  310.9.1 in the game's folder ghost the same way. What differs on a dropped
-  pair is NGX's input - object-only vectors with the camera's matrices on
-  the pairs before it, full vectors with an identity camera on the hitch
-  pair - and that switch is under test.
+  310.9.1 in the game's folder ghost the same way, and with the camera's
+  motion off the same pairs keep her solid. Keeping NGX's reading of the
+  vectors steady across the dropped pair did not help live either, so
+  until the cause is found - the split of the vectors, or the feature per
+  eye the option brings with it - leave the camera's motion off for
+  Stellar Blade; a hitch pair without it shows the car's smear around her
+  and nothing through her.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and

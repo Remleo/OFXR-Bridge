@@ -561,12 +561,6 @@ struct D3D12NativeDlssG::Impl {
     std::array<std::optional<CameraMotion>, 2> fitted{};
     // The motion each eye's pack took out this pair, for its evaluation.
     std::array<std::optional<std::array<float, 7>>, 2> pair_rigid{};
-    // This call's features take the camera's motion out of their vectors
-    // (camera_motion, and not the shared-stereo feature): NGX is then told
-    // on every evaluation that the vectors are the objects' own, with the
-    // camera's motion in the matrices where a pair has a fit and the
-    // identity where it has none.
-    bool split_pairs{};
     // A fit's result on its way back: a buffer per eye the fit writes, one
     // staging buffer both are copied into, and the fence of the submission.
     struct FitReadback {
@@ -582,6 +576,9 @@ struct D3D12NativeDlssG::Impl {
     UINT fit_slot{kSlots};
     bool camera_motion{};
     // Test only (XRFG_TEST_NATIVE_FIT_SCALE=0): a fit used unscaled.
+    // Test only (XRFG_TEST_NATIVE_FIT_DROP=0): a fit scaled by the frame-time
+    // ratio whatever the ratio, never dropped.
+    bool fit_drop{true};
     bool fit_time_scale{true};
     ComPtr<ID3D12PipelineState> fit;
     std::uint64_t fits_used{}, fits_rejected{};
@@ -672,7 +669,7 @@ struct D3D12NativeDlssG::Impl {
         if (behind > kFitMaxBehind || behind < -kFitMaxBehind) return std::nullopt;
         if (!fit_time_scale || !(m.dt_ms > 0.0F) || !(gb.frame_time_delta_ms > 0.0F)) return m.rigid;
         const float ratio = gb.frame_time_delta_ms / m.dt_ms;
-        const bool dropped = ratio < kFitScaleMin || ratio > kFitScaleMax;
+        const bool dropped = fit_drop && (ratio < kFitScaleMin || ratio > kFitScaleMax);
         if (decision_log && std::abs(ratio - 1.0F) > 0.1F) {
             std::fprintf(decision_log, "%llu fit eye=%u serial=%llu frame_time_ratio=%.3f %s\n",
                          GetTickCount64(), eye, m.serial, ratio, dropped ? "dropped" : "scaled");
@@ -1106,16 +1103,19 @@ struct D3D12NativeDlssG::Impl {
         // The camera's motion this pair's pack took out of the vectors: a
         // test's matrix if it gave one, else from the motion itself. A pair
         // without a fit - the reseed, the first pair, a hitch pair whose fit
-        // was dropped - keeps the identity, with the flag below unchanged:
-        // whole vectors and no camera motion say the same thing as split
-        // vectors and the camera's, and the flag flipping between the two
-        // readings on a hitch pair, between split pairs, is what NGX
-        // mishandled. Live in Stellar Blade (2X, 100%, three 25 ms
-        // suspensions of the process forcing five 50 ms pairs) the two
-        // hitch pairs with a car passing behind the character's head left
-        // her face translucent with the camera on and the flag flipped,
-        // where with the camera off throughout the same pairs kept her
-        // opaque; the library (310.1.0 or 310.9.1) made no difference.
+        // was dropped - is packed whole and read as such (the flag below).
+        //
+        // Live in Stellar Blade (2X, 100%, three 25 ms suspensions of the
+        // process forcing 50 ms pairs) the hitch pairs with a car passing
+        // behind the character's head leave her face translucent with the
+        // camera on, and keep her opaque with it off, whatever the DLSS-G
+        // library (310.1.0 or 310.9.1). Telling NGX "objects' own" with
+        // identity matrices on the dropped pair instead, so that the flag
+        // never flips mid-stream, was tried live under the same recipe and
+        // did not help - one pair came out worse - so the reading stays the
+        // pair's own. What the camera option changes besides the split is
+        // the feature per eye (shared_stereo is off with it), and which of
+        // the two is at fault on a hitch pair is the open question.
         const bool object_motion = !reset && eye < pair_rigid.size() && pair_rigid[eye].has_value();
         if (object_motion) {
             const XMMATRIX motion = eye < test_motion.size() && test_motion[eye]
@@ -1146,11 +1146,9 @@ struct D3D12NativeDlssG::Impl {
         o.cameraFOV = b.fov.angle_up - b.fov.angle_down;
         o.cameraAspectRatio = float(p.extent[0]) / p.extent[1];
         o.depthInverted = gb.depth_inverted;
-        // With the camera's motion in use the pack has taken the camera's
-        // own flow out of the vectors, and NGX is told so - on every
-        // evaluation of such a feature, the pairs without a fit included
-        // (split_pairs), so that the reading never flips mid-stream.
-        o.cameraMotionIncluded = !split_pairs;
+        // With a camera motion the pack has taken the camera's own flow out
+        // of the vectors, and NGX is told so.
+        o.cameraMotionIncluded = !object_motion;
         o.motionVectorsDilated = vectors_dilated; // false: NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
@@ -1223,6 +1221,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         // a feature per eye.
         p->camera_motion = environment(L"XRFG_NATIVE_DLSSG_CAMERA", camera ? 1U : 0U) != 0;
         p->fit_time_scale = environment(L"XRFG_TEST_NATIVE_FIT_SCALE", 1U) != 0;
+        p->fit_drop = environment(L"XRFG_TEST_NATIVE_FIT_DROP", 1U) != 0;
         p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE") && !p->camera_motion;
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         p->scale = std::clamp(environment(L"XRFG_NATIVE_DLSSG_SCALE", scale), kMinScale, 100U);
@@ -1635,7 +1634,6 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         };
         std::array<Params, 2> eye_params{};
         bool reseeded_pair = false;
-        p.split_pairs = p.camera_motion && !shared;
         for (UINT f = 0; f < feature_count; ++f) {
             auto &feature = p.features[f];
             const UINT first = shared ? 0 : f, last = shared ? 1 : f;

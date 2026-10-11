@@ -1348,16 +1348,26 @@ hitch pairs from 44.6 to 50 ms, one of them a 45.5 ms frame after a 16.7
 (ratio 2.7), and her head, hair and body solid on every one, the extreme
 pair with a faint copy of her hair ornament beside her head and a
 background sign doubling a little on another. So the library does not
-matter at all, and the dropped-fit pair's flip of `cameraMotionIncluded`
-is the fault.
-The fix keeps the flag steady: a feature that takes the camera's motion out
-of its vectors tells NGX on every evaluation that the vectors are the
-objects' own (`split_pairs`), with the camera's motion in the matrices
-where the pair has a fit and the identity where it has none - whole
-vectors and no camera motion say the same thing as split vectors and the
-camera's, so a hitch pair, a reseed and the first pair now read the same
-way as the pairs around them. Until it is confirmed live by the same
-injected-stall capture, the user's tray runs with the camera off.
+matter at all, and the camera option is what ghosts on a hitch pair.
+What the dropped-fit pair did differently was flip NGX's reading of the
+vectors - the pairs before it read "objects' own" with the camera's
+matrices, the hitch pair "everything included" with the identity - so the
+first attempt kept the flag steady, telling NGX "objects' own" with
+identity matrices on every pair without a fit. Live under the same recipe
+(`build/captures/sb/hitchlive_cam1_fix`, four 50 ms pairs) it did not help:
+her hair partly see-through on one pair, her ponytail gone against the car
+on another, and on a 50 ms pair after a 21.7 ms one her upper body heavily
+translucent with the rocks behind showing through, the worst seen. The
+change is taken back. The camera option changes two things at once - the
+split of the vectors, and a feature per eye in place of the shared-stereo
+one - and which is at fault on a hitch pair is the open question; the cuts
+are per-eye features without the camera (`XRFG_NATIVE_DLSSG_CAMERA=0
+XRFG_NATIVE_DLSSG_PER_EYE=1`), the previous fit used unscaled and never
+dropped (`XRFG_TEST_NATIVE_FIT_SCALE=0`), and the fit scaled by the
+frame-time ratio and never dropped (`XRFG_TEST_NATIVE_FIT_DROP=0`, a knob
+added for this), each under the same injected stalls. Until that is
+settled the camera option is off on the test rig and is not recommended
+for Stellar Blade.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
@@ -1534,7 +1544,19 @@ presenter hands the submissions to its own thread while the game renders,
 which is the mode the rounding cannot reach, and where the automatic choice
 was measured. `xrfg_frame_loop_meta_single` and `xrfg_frame_loop_meta_split`
 cover the rule and `xrfg_layer_auto_frames_inline_paced` the check, on the
-fake runtime with its waits paced to the period grid. Since the forwarded
+fake runtime with its waits paced to the period grid. Live on that build
+Deep Rock Galactic asked for the presenter on its first generating frame
+and had it 23 ms later (601 then 602, 9 s in). At UEVR scale 1.0 (log pid
+55000) it then ran 45 a second at 2.00 periods with a period of slack in
+the hold, the GPU at 50%, 90 submissions a second and no repeat, where the
+inline session at the same scale had run 39.7 a second at 2.27 periods,
+every third or fourth frame rounded up to a slot. At scale 1.9 (log pid
+7552) it ran 36 a second at 2.5 periods with 0.7 of slack and the GPU at
+72% against 30 inline, and stayed at 2X: there the simulator's own
+xrEndFrame costs 6.7 ms a submission (internal_end_frame) and its wait
+5 ms, so the presenter's two submissions a pair take 23.5 ms, longer than
+the pair, and 3X could not have helped; the slack rule read that
+correctly. Since the forwarded
 wait can overlap a render thread's work in a pipelined game, room to spare
 inline also needs
 the xrEndFrame thread's CPU share of its wall time (`GetThreadTimes` a
