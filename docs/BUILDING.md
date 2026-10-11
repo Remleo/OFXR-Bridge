@@ -1411,7 +1411,12 @@ the engine's attempt comes first it fails fast (-2, no runtime) and the
 session is fine, which is how every other launch today went. Launch UEVR
 games with `-nohmd` (`-GameArgs '-dx12 -nohmd'`): the engine opens no
 instance, UEVR's is the only one, and native DLSS FG on that path ran 44.9
-+ 44.9 a second on the presenter with no quarantine.
++ 44.9 a second on the presenter with no quarantine. The six native games
+of the regression round were then run with native DLSS FG selected
+(release 30's layer, 100%, the camera off): Hubris, Kayak VR, Moss Book II,
+Moss, RoboQuest VR and FlatOut 4 VR all generated natively on the
+presenter at 45 real and 45 generated a second, no quarantine, no error,
+FlatOut's D3D11 bridge included.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
