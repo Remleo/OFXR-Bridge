@@ -138,11 +138,14 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   motion left over, so live the fit alternated pair by pair between the
   whole turn and nothing (3.8 degrees, 0.02, 3.8, 3.8, 0.04 in a 67%
   decision log). The fit now puts that flow back before fitting; replayed,
-  a pair's own fit matches the one it was handed to three decimals. The
-  67% ghosting on ordinary turns recorded before this (the character
-  translucent wherever a busy background was behind her) was measured with
-  the alternating fit and is to be re-measured; until then the option
-  stays for 100% only.
+  a pair's own fit matches the one it was handed to three decimals, and
+  live a steady turn now fits to the same angle pair after pair (3.787,
+  3.786, 3.788 degrees) at 0.09 to 0.19 px. The 67% ghosting on ordinary
+  turns is still there with the fixed fit (the character translucent
+  side-on and from behind wherever a busy background is behind her; front
+  views clean), where 100% is mostly solid with a faint translucency of
+  her hair in back views. So the option stays for 100% only, and off by
+  default: a feature per eye at 67% without the camera's motion is solid.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and

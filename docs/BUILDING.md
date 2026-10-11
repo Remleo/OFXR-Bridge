@@ -1520,8 +1520,23 @@ handed to three decimals (6.545 against 6.547 degrees, the translation
 and residual the same), at 67% and at 100% alike. The whole-frame error
 of the replay does not move, since each replayed pair takes the handed
 fit either way; what changes is every pair after the first in a live
-run. The 67% verdict above was taken with the alternating fit and is to
-be re-measured with the live recipe.
+run. Live, with the fix (`hitch_cam1_67_fitfix`, `hitch_cam1_100_fitfix`,
+the same recipe): the steady turn fits to 3.787, 3.786, 3.788 degrees
+pair after pair, residuals 0.09 to 0.12 px at 67% and 0.19 at 100% over
+a thousand turning fits each, no alternation. The 67% verdict stands
+regardless: hitch pairs show B, and the normal pairs still ghost (a side
+view with stairs behind her heavily translucent, body and head; a
+three-quarter back view with head and back translucent; hair or face
+faded in three more), front views clean. At 100% the normal pairs are
+mostly solid, with a faint, doubled ponytail and a hair edge in two back
+views. So the fit was one defect, and whatever remains is particular to
+the camera split at the reduced feature. One fact for the next attempt:
+with a DLSS-Quality game the guide grid at 100% is coarse (two thirds of
+the feature) and at 67% the feature's own size, so the two scales pack
+the same 2469-wide motion and depth and differ only in the colour
+feature (3703 against 2469); the difference is in how NGX separates
+camera from object at the smaller feature, not in the guides handed to
+it.
 
 A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
 the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the
