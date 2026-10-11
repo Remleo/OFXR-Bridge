@@ -1443,6 +1443,29 @@ configuration, native DLSS FG (`hitch_dlss_shift`): 50 of 777 and 5 of
 right before stalls included, so the extra held frame of the first build
 is gone.
 
+The feature's size, and the camera's motion at 67%. Per-eye features at
+67% with the camera off were clean on six of six forced hitch pairs
+(`hitch_pereye67_noskip`, `hitch_pereye67_b`) where 100% ghosted most, so
+the per-eye weakness on a doubled step is the feature's size: the step
+fits NGX's flow range in the smaller feature. But the camera's motion at
+67% (`hitch_cam1_67`, both skips on) ghosts ordinary turns: her hair and
+the back of her head translucent with the car through them side-on, her
+face and arm faded three-quarter back against bushes, her back faded from
+behind with the road through it, while front views and a dark background
+stay solid; the hitch pairs show B as they should. The camera at 100% was
+clean on normal turns before the hitch work, and the pack's subtraction,
+the GPU fit and the matrices are all in UV or the eye's pixels, the same
+at any scale. One candidate was tried and taken back: taking the nearest
+surface's depth among a texel's four neighbours for the camera term and
+the packed depth at a reduced scale, since the colour there is a bilinear
+average and the depth was the centre texel's, so a silhouette's camera
+flow could be the background's. Live (`hitch_cam1_67_fix`) the front views
+were clean and the rest still ghosted. So the camera's motion is for 100%
+only until the cause is found; the replay cannot see it (whole-frame
+numbers put the camera's penalty at +0.5 at 100% and +0.4 at 67% on the
+same hitch triplets, and the rot1 turn triplets carry no camera motion at
+all), so the live recipe with crops is the instrument.
+
 A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
 the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the
 dumps in `%LOCALAPPDATA%\CrashDumps`: `std::terminate` inside the

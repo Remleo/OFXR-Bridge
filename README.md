@@ -127,9 +127,11 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   (the one that doubles: a stall during a frame shows in the next frame's
   step), and otherwise the frames' arrival, taken one pair later for the
   same reason. `XRFG_HITCH_SKIP=0` in the game's environment turns it off
-  (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check). Leave **DLSS Frame Generation camera
-  motion** off for such games; its feature per eye ghosts more of these
-  pairs.
+  (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check). **DLSS
+  Frame Generation camera motion** is for 100% only: at 67% it leaves the
+  character translucent on ordinary turns wherever a busy background is
+  behind her (a feature per eye at 67% without the camera is fine, and the
+  camera at 100% is fine), and why is not yet understood.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and
