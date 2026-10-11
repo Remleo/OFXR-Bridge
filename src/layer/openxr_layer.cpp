@@ -1208,8 +1208,11 @@ struct SessionState {
         std::uint32_t frames{}, repeats{};
         std::uint32_t probes{}, busy{};
         double interval_ns{}, slack_ns{};
+        double cpu_share{-1.0};
     };
-    std::array<AutoPoll, 8> auto_window{};
+    // Sixteen polls, four seconds: the newest eight say whether the game is
+    // short, all sixteen whether it has room to spare.
+    std::array<AutoPoll, 16> auto_window{};
     std::size_t auto_window_filled{};
     std::size_t auto_window_next{};
     double auto_slack_ema_ns{-1.0};
@@ -1224,6 +1227,15 @@ struct SessionState {
     bool game_probe_tried{};
     std::uint64_t auto_probes_seen{};
     std::uint64_t auto_busy_seen{};
+    // The probe's own thread, once a display period, uniform in time whatever
+    // the game's phase; joined before the session goes.
+    std::thread auto_probe_thread;
+    std::atomic<bool> auto_probe_stop{false};
+    // The xrEndFrame thread's CPU time, for the share of its wall time it
+    // runs: the CPU side of the headroom where there is no presenter hold.
+    std::uint64_t auto_cpu_time_100ns{};
+    std::chrono::steady_clock::time_point auto_cpu_at{};
+    double auto_cpu_share{-1.0};
     // The application's xrEndFrame thread only: the run of pairs that waited
     // at admission observe_admission_wait counts, how many runs long it must
     // be, and the presenter frame it adds to the next once-per-pair hold.
@@ -1920,11 +1932,21 @@ template <typename Call>
 [[nodiscard]] auto with_runtime_entry_for_wait(
     const std::shared_ptr<SessionState>& session, Call&& call)
     -> decltype(call()) {
-    return with_runtime_entry(
+    // Without the presenter these waits are on the game's threads, and the
+    // time they block is the game's slack, for the automatic multiplier.
+    const auto entered = std::chrono::steady_clock::now();
+    auto result = with_runtime_entry(
         session && session->graphics_binding == SessionGraphicsBinding::vulkan
             ? nullptr
             : session.get(),
         std::forward<Call>(call));
+    if (session && !(session->presenter_active && !session->presenter_stop_requested)) {
+        session->auto_frame_slack_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - entered).count(),
+            std::memory_order_relaxed);
+    }
+    return result;
 }
 
 // Test only: a runtime whose head and controllers move with no one wearing
@@ -6534,6 +6556,12 @@ XrResult layer_destroy_session_impl(XrSession session) {
 
     xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     stop_continuous_presenter(state);
+    // The GPU probe's thread, before anything it reads goes.
+    state->auto_probe_stop.store(true, std::memory_order_relaxed);
+    if (state->auto_probe_thread.joinable()) {
+        state->auto_probe_thread.join();
+    }
+    state->game_probe_live.store(nullptr, std::memory_order_release);
     state->fps_overlay.reset();
     // The status panel's grip spaces, which the overlay read until now.
     for (XrSpace& grip : state->panel_grip_spaces) {
@@ -10741,10 +10769,6 @@ void continuous_presenter_main(
         if (!request) {
             state->auto_presenter_repeats.fetch_add(1, std::memory_order_relaxed);
         }
-        // One probe of the game's GPU a display period (automatic 2X or 3X).
-        if (auto* probe = state->game_probe_live.load(std::memory_order_acquire)) {
-            probe->probe();
-        }
         if (XR_SUCCEEDED(end_result) && state->presenter_display_period > 0) {
             state->runtime_slowed.store(
                 frame_state.predictedDisplayPeriod >
@@ -13899,9 +13923,23 @@ void follow_synthetic_pose(SessionState& state) noexcept {
 // Blade the probe read the city 67% busy (22 ms a frame) and 3X held for
 // the whole orbit with no repeat; the pause menu read 53% (12 ms) and 2X
 // came back in six seconds.
+//
+// Coming down takes four seconds of room to spare, going up two seconds of
+// want: a late return costs a lower game rate for a moment, an early one
+// costs repeats on screen (Stellar Blade's last second of orbit, a light
+// view, had brought 2X back two seconds before the menu).
+//
+// Inline, without a presenter, the game's threads block in the runtime's
+// wait instead - its own, forwarded, and the layer's cycle's - and that
+// time is its slack (with_runtime_entry_for_wait). The forwarded wait may
+// overlap a render thread's work in a pipelined game, so inline the
+// xrEndFrame thread's share of its wall time on the CPU (GetThreadTimes a
+// poll) must be under 1.85 periods a frame as well, beside the probe's GPU
+// time. Without a probe an inline session never comes back by itself.
 [[nodiscard]] std::uint32_t automatic_frame_multiplier(
     SessionState& state,
-    std::chrono::steady_clock::time_point now) noexcept {
+    std::chrono::steady_clock::time_point now,
+    bool inline_session) noexcept {
     const std::uint32_t current = state.frames_per_application_frame;
     const std::uint64_t frames = state.auto_presenter_frames.load(std::memory_order_relaxed);
     const std::uint64_t repeats = state.auto_presenter_repeats.load(std::memory_order_relaxed);
@@ -13912,28 +13950,49 @@ void follow_synthetic_pose(SessionState& state) noexcept {
         static_cast<std::uint32_t>(repeats - state.auto_repeats_seen),
         static_cast<std::uint32_t>(counts.probes - state.auto_probes_seen),
         static_cast<std::uint32_t>(counts.busy - state.auto_busy_seen),
-        state.auto_interval_ema_ns, state.auto_slack_ema_ns};
+        state.auto_interval_ema_ns, state.auto_slack_ema_ns, state.auto_cpu_share};
     state.auto_window_next = (state.auto_window_next + 1) % state.auto_window.size();
     state.auto_window_filled = std::min(state.auto_window_filled + 1, state.auto_window.size());
     state.auto_frames_seen = frames;
     state.auto_repeats_seen = repeats;
     state.auto_probes_seen = counts.probes;
     state.auto_busy_seen = counts.busy;
-    const double period = static_cast<double>(state.presenter_display_period);
+    double period = static_cast<double>(state.presenter_display_period);
+    if (period <= 0.0) {
+        std::scoped_lock lock(state.mutex);
+        period = static_cast<double>(state.minimum_runtime_display_period);
+    }
     if (state.auto_window_filled < state.auto_window.size() || period <= 0.0 ||
         state.runtime_slowed.load(std::memory_order_relaxed) || state.auto_slack_ema_ns < 0.0) {
         return current;
     }
     std::uint64_t shown = 0, repeated = 0, probes = 0, busy = 0;
     bool slow_throughout = true, spare_throughout = true, gpu_spare_throughout = true;
-    for (const auto& poll : state.auto_window) {
+    for (std::size_t i = 0; i < state.auto_window.size(); ++i) {
+        const auto& poll = state.auto_window[i];
         shown += poll.frames;
         repeated += poll.repeats;
         probes += poll.probes;
         busy += poll.busy;
-        slow_throughout = slow_throughout && poll.interval_ns > 2.15 * period &&
-            poll.slack_ns >= 0.0 && poll.slack_ns < 0.25 * period;
-        spare_throughout = spare_throughout && poll.slack_ns > 1.15 * period;
+        // Short of 2X: the interval over 2.15 periods, or one shown frame in
+        // twelve a repeat where the runtime's presenter repeats, with no
+        // slack - over the newest eight polls, two seconds, since the
+        // repeats are what is seen. Stellar Blade on native DLSS FG came
+        // back to 2X on a light view and then sat at 2.06 to 2.4 periods
+        // with 10 to 28% repeats, under the interval rule alone.
+        const std::size_t age = (state.auto_window_next + state.auto_window.size() - 1 - i) % state.auto_window.size();
+        const bool repeating = poll.frames >= 8 &&
+            static_cast<double>(poll.repeats) / static_cast<double>(poll.frames) > 0.08;
+        if (age < 8) {
+            slow_throughout = slow_throughout && (poll.interval_ns > 2.15 * period || repeating) &&
+                poll.slack_ns >= 0.0 && poll.slack_ns < 0.25 * period;
+        }
+        // Room to spare: the slack (the presenter's holds, or inline the
+        // layer's wait) over 1.15 periods, and inline, where that wait may
+        // overlap a render thread's work, that thread's CPU time too.
+        spare_throughout = spare_throughout && poll.slack_ns > 1.15 * period &&
+            (!inline_session ||
+             (poll.cpu_share >= 0.0 && poll.cpu_share * std::max(poll.interval_ns, 0.0) < 1.85 * period));
         // The GPU's time a frame at this poll, from this poll's probes alone:
         // a window that straddles a scene change must not average the
         // light frames before it into the heavy ones after.
@@ -13950,15 +14009,17 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     const auto dwell = now - state.frames_auto_since;
     // 1700, each poll: a the GPU's busy share in a thousand in the high half
     // (65535 unknown) and the repeats in a thousand shown over the window in
-    // the low, b the game's slack a frame in microseconds, c the frames now
-    // in the high word and the game's frame interval in microseconds in the
-    // low.
+    // the low, b the xrEndFrame thread's CPU share in a thousand in the high
+    // word and the game's slack a frame in microseconds in the low, c the
+    // frames now in the high word and the game's frame interval in
+    // microseconds in the low.
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         1700,
         ((probed ? static_cast<std::uint64_t>(gpu_share * 1000.0) : 65535ULL) << 16) |
             static_cast<std::uint64_t>(repeat_share * 1000.0),
-        static_cast<std::uint64_t>(std::max(state.auto_slack_ema_ns, 0.0) / 1000.0),
+        (static_cast<std::uint64_t>(std::max(state.auto_cpu_share, 0.0) * 1000.0) << 32) |
+            static_cast<std::uint32_t>(std::max(state.auto_slack_ema_ns, 0.0) / 1000.0),
         (static_cast<std::uint64_t>(current) << 32) |
             static_cast<std::uint32_t>(std::max(state.auto_interval_ema_ns, 0.0) / 1000.0));
     if (state.auto_interval_ema_ns < 0.0) {
@@ -13973,7 +14034,7 @@ void follow_synthetic_pose(SessionState& state) noexcept {
                 dwell >= std::chrono::seconds(4)) {
                 return 2U;
             }
-        } else if (dwell >= std::chrono::seconds(20)) {
+        } else if (!inline_session && dwell >= std::chrono::seconds(20)) {
             return 2U;
         }
     }
@@ -14026,10 +14087,11 @@ void apply_live_frame_multiplier(
         }
         std::uint32_t target = xrfg::implicit_layer::read_triple_frame_gen(directory) && !limited ? 3U : 2U;
         std::uint64_t reason = 2;
-        if (automatic && use_continuous_presenter && !limited) {
+        if (automatic && !limited) {
             if (!state->game_probe_tried) {
-                // The game's GPU, probed on its own queue; a bridged session's
-                // queue is the layer's, which says nothing about the game.
+                // The game's GPU, probed on its own queue from a thread of its
+                // own once a display period; a bridged session's queue is the
+                // layer's, which says nothing about the game.
                 state->game_probe_tried = true;
                 if (state->graphics_binding == SessionGraphicsBinding::d3d12 && state->d3d12_device &&
                     state->d3d12_queue) {
@@ -14037,10 +14099,42 @@ void apply_live_frame_multiplier(
                     if (SUCCEEDED(probe->initialize(state->d3d12_device.Get(), state->d3d12_queue.Get()))) {
                         state->game_probe = std::move(probe);
                         state->game_probe_live.store(state->game_probe.get(), std::memory_order_release);
+                        state->auto_probe_stop.store(false, std::memory_order_relaxed);
+                        xrfg::D3D12QueueProbe* live = state->game_probe.get();
+                        SessionState* session = state.get();
+                        state->auto_probe_thread = std::thread([live, session] {
+                            while (!session->auto_probe_stop.load(std::memory_order_relaxed)) {
+                                XrDuration period = session->presenter_display_period;
+                                if (period <= 0) period = session->minimum_runtime_display_period;
+                                const DWORD ms = static_cast<DWORD>(std::clamp<XrDuration>(
+                                    period > 0 ? period / 1'000'000 : 11, 5, 20));
+                                Sleep(ms);
+                                live->probe();
+                            }
+                        });
                     }
                 }
             }
-            target = automatic_frame_multiplier(*state, now);
+            // The xrEndFrame thread's CPU share since the last poll.
+            {
+                FILETIME created{}, exited{}, kernel{}, user{};
+                if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) {
+                    const std::uint64_t cpu =
+                        (static_cast<std::uint64_t>(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) +
+                        (static_cast<std::uint64_t>(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+                    if (state->auto_cpu_at != std::chrono::steady_clock::time_point{}) {
+                        const double wall_100ns = static_cast<double>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(now - state->auto_cpu_at).count()) / 100.0;
+                        if (wall_100ns > 0.0) {
+                            state->auto_cpu_share = std::min(1.0,
+                                static_cast<double>(cpu - state->auto_cpu_time_100ns) / wall_100ns);
+                        }
+                    }
+                    state->auto_cpu_time_100ns = cpu;
+                    state->auto_cpu_at = now;
+                }
+            }
+            target = automatic_frame_multiplier(*state, now, !use_continuous_presenter);
             reason = 3;
         }
         if (target == state->frames_per_application_frame) {

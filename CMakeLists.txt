@@ -845,6 +845,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_layer_auto_frames COMMAND xrfg_layer_manual_disarm_tests
             $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> auto-frames)
         set_tests_properties(xrfg_layer_auto_frames PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        add_test(NAME xrfg_layer_auto_frames_inline COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> auto-frames-inline)
+        set_tests_properties(xrfg_layer_auto_frames_inline PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         # The flight recorder switched on, off and on again in a running
         # session: the session records from before the switch head the file.
         add_test(NAME xrfg_layer_live_recorder COMMAND xrfg_layer_manual_disarm_tests

@@ -531,9 +531,6 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
         } else if (asked.frames < running.frames) {
             reason("Switching to 2X", PanelTone::dim);
         }
-        if (asked.frames_auto && !input.presenter) {
-            reason("Automatic 2X or 3X waits for the presenter thread", PanelTone::dim);
-        }
         if (set.deep && !running.deep && running.frames <= 2 && input.shallow_fallback) {
             reason("The runtime refused a fourth swapchain: shallow pipeline", PanelTone::warn);
         }

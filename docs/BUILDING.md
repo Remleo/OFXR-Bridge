@@ -1435,7 +1435,28 @@ generated frames a second with no repeat at all, where run 3 had flapped
 35 times; the pause menu read 53% busy, 11.7 ms a frame, and 2X came back
 within six seconds and held with 45 + 45 and no repeat. The GPU condition
 is now required at every poll of the window as well, which takes the one
-return at 20 s with it. Every poll writes `presenter_transition` 1700
+return at 20 s with it. The same on native DLSS FG (log pid 61480): 3X in
+the city at 66-68% busy with no repeats, 2X back in the menu, no flapping,
+but the return came on the orbit's last second, a light view of two seconds
+(the share at 0.40), and 2X then sat at 2.06 to 2.4 periods with 10 to 28%
+repeats until the menu. So the window is sixteen polls: the newest eight
+decide that the game is short - an interval over 2.15 periods, or more
+than one shown frame in twelve a repeat, with no slack - and all sixteen
+that it has room to spare, four seconds of light frames before 2X comes
+back. Inline sessions have no hold for the slack to show in: the game's
+threads block in the runtime's wait instead, its own forwarded one and the
+layer's cycle's, and `with_runtime_entry_for_wait` counts that time as the
+slack while no presenter runs. Since the forwarded wait can overlap a
+render thread's work in a pipelined game, room to spare inline also needs
+the xrEndFrame thread's CPU share of its wall time (`GetThreadTimes` a
+poll) under 1.85 periods a frame, beside the probe's GPU time; the probe
+runs on a thread of its own once a display period, uniform in time
+whatever the game's phase, so a presenter is no longer needed. The D3D11
+and Vulkan bridges have no probe and keep the chosen shape (a presenter
+session on them comes back by slack alone after twenty seconds).
+`xrfg_layer_auto_frames_inline` runs the test on the fake Pimax runtime,
+which stays inline; its wait never blocks, so only the way up can be seen
+there: 3X after 4.2 s of slow frames, and no second switch. Every poll writes `presenter_transition` 1700
 (a repeats in a thousand shown, b slack in microseconds, c the shape in
 the high word and the interval in microseconds in the low), and a switch
 writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application

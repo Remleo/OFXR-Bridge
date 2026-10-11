@@ -1,3 +1,4 @@
+#include <map>
 #define main existing_call_chain_main
 #include "layer_call_chain.cpp"
 #undef main
@@ -69,7 +70,11 @@ int main(int argc, char** argv) {
     // "auto-frames": frames_auto=1 on the SteamVR presenter; a game that
     // cannot keep half the refresh rate is given 3X, and one that then has a
     // period to spare at 3X is given 2X back.
-    const bool auto_test = mode == "auto-frames";
+    const bool auto_test = mode == "auto-frames" || mode == "auto-frames-inline";
+    // "auto-frames-inline": the same on a session that stays inline (the fake
+    // Pimax runtime), where the interval alone sends it to 3X and the probe's
+    // GPU time with the xrEndFrame thread's CPU share bring 2X back.
+    if (mode == "auto-frames-inline") g_runtime_name_override = "Pimax OpenXR";
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
     const std::string loop_runtime = frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
@@ -85,7 +90,7 @@ int main(int argc, char** argv) {
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
-    g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr" || switch_test || auto_test;
+    g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr" || switch_test || mode == "auto-frames";
     g_d3d11_interop_mode = mode == "d3d11";
     // The interop keeps the private rings; every D3D12 mode takes the
     // single-swapchain rings the shipped ini turns on.
@@ -517,11 +522,13 @@ int main(int argc, char** argv) {
             // Frames paced by a sleep: 25 ms of "work" a frame against the
             // fake runtime's 10 ms period cannot keep 2X's 20 and repeats;
             // 2 ms leaves a period and more to spare at 3X.
+            std::map<XrDuration, int> periods_seen;
             const auto frames_until = [&](XrDuration period_wanted, DWORD work_ms, int seconds,
                                           const char* what) {
                 const auto started = std::chrono::steady_clock::now();
                 const auto deadline = started + std::chrono::seconds(seconds);
                 int frames = 0;
+                periods_seen.clear();
                 while (std::chrono::steady_clock::now() < deadline) {
                     Sleep(work_ms);
                     require(XR_SUCCEEDED(begin(session, nullptr)), what);
@@ -530,6 +537,7 @@ int main(int argc, char** argv) {
                     require(wait_for_queue_idle(), what);
                     require(XR_SUCCEEDED(wait(session, nullptr, &current)), what);
                     ++frames;
+                    ++periods_seen[current.predictedDisplayPeriod];
                     if (current.predictedDisplayPeriod == period_wanted) {
                         return std::make_pair(true, std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - started).count());
@@ -559,10 +567,61 @@ int main(int argc, char** argv) {
                     }
                 }
                 std::cerr << what << ": " << shown << " shown, " << repeats << " repeats, " << switches
-                          << " switches, " << polls.size() << " polls" << std::endl;
+                          << " switches, " << polls.size() << " polls; periods seen:";
+                for (const auto& [period, count] : periods_seen) std::cerr << ' ' << period << 'x' << count;
+                std::cerr << std::endl;
                 for (std::size_t i = polls.size() > 4 ? polls.size() - 4 : 0; i < polls.size(); ++i)
                     std::cerr << "  " << polls[i] << std::endl;
             };
+            if (mode == "auto-frames-inline") {
+                // Inline the fake runtime's wait never blocks, so the game is
+                // never held and its slack is nil: the shape it is given is
+                // read from the layer's own records (700 with c=3), and only
+                // the way up can be seen. Fifteen seconds of slow frames: 3X
+                // once, and no second switch after it.
+                const auto switches = [&] {
+                    std::filesystem::path newest;
+                    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                        const auto name = entry.path().filename().string();
+                        if (name.rfind("ofxr-bridge-flight-", 0) == 0 && (newest.empty() || entry.path() > newest))
+                            newest = entry.path();
+                    }
+                    std::vector<std::uint32_t> shapes;
+                    if (newest.empty()) return shapes;
+                    std::ifstream in(newest, std::ios::binary);
+                    for (std::string line; std::getline(in, line);) {
+                        const auto at = line.find("op=presenter_transition result=700 dur_us=0 a=");
+                        if (at != std::string::npos && line.find(" c=3") != std::string::npos)
+                            shapes.push_back(static_cast<std::uint32_t>(line[at + 46] - '0'));
+                    }
+                    return shapes;
+                };
+                const auto started = std::chrono::steady_clock::now();
+                double at_3x = -1.0;
+                while (std::chrono::steady_clock::now() < started + std::chrono::seconds(20)) {
+                    Sleep(25);
+                    require(XR_SUCCEEDED(begin(session, nullptr)), "slow frames");
+                    capture();
+                    submit(current.predictedDisplayTime);
+                    require(wait_for_queue_idle(), "slow frames");
+                    require(XR_SUCCEEDED(wait(session, nullptr, &current)), "slow frames");
+                    const auto seen = switches();
+                    if (at_3x < 0.0 && !seen.empty() && seen.back() == 3U) {
+                        at_3x = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                    }
+                    if (at_3x >= 0.0 && std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - started).count() > at_3x + 6.0) {
+                        break;
+                    }
+                }
+                const auto seen = switches();
+                if (at_3x < 0.0 || seen.size() != 1) explain("inline");
+                require(at_3x >= 0.0, "an inline game under half the refresh rate is given 3X");
+                require(seen.size() == 1, "an inline game held short stays at 3X");
+                std::cout << "auto-frames-inline: 3X after " << at_3x << " s, held" << std::endl;
+                result = 0;
+                throw FinishedEarly{};
+            }
             const auto up = frames_until(kFakeDisplayPeriod * 3, 25, 15, "slow frames");
             if (!up.first) explain("slow frames");
             require(up.first, "a game under half the refresh rate is given 3X");

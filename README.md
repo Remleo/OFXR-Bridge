@@ -195,8 +195,8 @@ half the refresh rate, 2X again once it has a display period to spare at 3X
 row offers it too). The choice is made from the game's frame interval, the
 time it waits in the layer and how busy its GPU is, so it follows a game
 through a heavy scene and back without flapping. It needs the live 3X switch (Prefer FPS over latency on; on
-DLSS Frame Generation an RTX 50) and the layer's presenter thread: a session
-that runs inline keeps the shape you chose, and the panel says so.
+DLSS Frame Generation an RTX 50) and a D3D12 game; a game on the D3D11 or
+Vulkan bridge keeps the shape you chose.
 
 | Where | Setting |
 |---|---|
