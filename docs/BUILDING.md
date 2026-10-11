@@ -1459,8 +1459,13 @@ short, under three quarters of the median, and the flight log writes
 `synthesis_pair` 779 (step, median, serial) for the pairs let through.
 The same run on this layer, 98 seconds: 29 skips (778) and 189 pairs let
 through (779); after loading, 19 and 144, the repeats down to 0.3 a
-second. The remaining skips follow gaps of 35 to 55 ms with the next gap
-at 18 to 26, which the arrival alone cannot tell from a stall. Games
+second. The remaining skips are the game's own stalls: the gaps between
+its end-frame calls, 22.2 ms like clockwork at 45 frames a second, open
+to 44, 47, 55 and 78 ms before them, the next gap 18 to 20, so the two
+steps together run 12 ms over two periods at the median and up to 56
+over; the pairs let through sit on a 28 to 50 ms gap followed by one of
+12 to 15, two periods in all. A handful sit on the line (a 28 ms gap and
+then 22, a 29 and then 26), where the arrival alone cannot say. Games
 whose guides carry a frame time (777) are untouched; the forced-hitch
 recipe above runs on those.
 
