@@ -536,6 +536,42 @@ int main() {
         }
     }
 
+    // A tray restart adopts running sessions rather than stopping them:
+    // retiring a manifest leaves its arm event alone, open_arm_signal takes
+    // the event a live session still holds, and a stop through it stops that
+    // session; an event no one holds any more is gone.
+    {
+        namespace il = xrfg::implicit_layer;
+        const auto manifest = std::filesystem::temp_directory_path() /
+            (L"XR_APILAYER_XRFrameBridge_manual-" + std::to_wstring(GetCurrentProcessId()) +
+             L"-1.json");
+        HANDLE earlier_tray = il::create_arm_signal(manifest);
+        HANDLE session = earlier_tray == nullptr ? nullptr
+            : OpenEventW(SYNCHRONIZE, FALSE, il::arm_signal_name(manifest).c_str());
+        if (earlier_tray == nullptr || session == nullptr) {
+            std::cerr << "adopt: making the arm event failed\n";
+            return 1;
+        }
+        CloseHandle(earlier_tray);
+        std::wstring error;
+        const bool retired = il::retire_manifest(manifest, il::RegistryScope::current_user, &error);
+        const bool still_running = WaitForSingleObject(session, 0) == WAIT_TIMEOUT;
+        HANDLE adopted = il::open_arm_signal(manifest, &error);
+        const bool opened = adopted != nullptr && error.empty();
+        const bool stopped = opened && SetEvent(adopted) != FALSE &&
+            WaitForSingleObject(session, 0) == WAIT_OBJECT_0;
+        if (adopted) CloseHandle(adopted);
+        CloseHandle(session);
+        HANDLE gone = il::open_arm_signal(manifest, &error);
+        if (gone) CloseHandle(gone);
+        if (!retired || !still_running || !opened || !stopped || gone != nullptr || !error.empty()) {
+            std::cerr << "adopting a running session failed: retired " << retired
+                      << " running " << still_running << " opened " << opened << " stopped "
+                      << stopped << " gone " << (gone == nullptr) << "\n";
+            return 1;
+        }
+    }
+
     std::cout << "OFXR manual persistent launcher support tests passed\n";
     return 0;
 }

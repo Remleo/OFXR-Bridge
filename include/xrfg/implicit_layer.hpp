@@ -15,6 +15,14 @@ namespace xrfg::implicit_layer {
                                       std::wstring* error = nullptr) noexcept;
 [[nodiscard]] bool signal_arm_stop(const std::filesystem::path& manifest,
                                     std::wstring* error = nullptr) noexcept;
+// The arm and pause events of a session an earlier tray armed, for a tray
+// that starts while it runs: a restart takes them over (the tray's
+// adopt_retired_arms) instead of stopping the session, which no re-arm could
+// start again, and signals them with its own at Disarm and Exit. Null, with
+// an empty error, when no session holds the event any more.
+[[nodiscard]] void* open_arm_signal(const std::filesystem::path& manifest,
+                                    std::wstring* error = nullptr) noexcept;
+[[nodiscard]] void* open_pause_signal(const std::filesystem::path& manifest) noexcept;
 // The tray's "Pause frame generation" switch: a second manual-reset event
 // per arm, set while paused and reset on resume. Unlike the stop it goes both
 // ways, and a session that cannot open it is simply never paused. The name
@@ -297,6 +305,10 @@ private:
 
 // Disable before deleting; read back registry state, and retain the JSON when
 // deregistration fails. The caller must report a false result, never claim Off.
+// Sessions running on the manifest are left running: stopping them is the
+// tray's explicit act (signal_arm_stop), not a side effect of taking the
+// registration back, so a tray that restarts, or crashes and is started
+// again, keeps a game generating.
 [[nodiscard]] bool retire_manifest(
     const std::filesystem::path& manifest,
     RegistryScope scope,
@@ -305,11 +317,14 @@ private:
 
 // Registry-first recovery across ALL versions, including missing JSON files.
 // Removes only owned registration values and owned JSONs, never DLLs/settings.
+// Every manifest found is appended to `retired`, if given, for the caller to
+// adopt or stop the sessions running on it.
 [[nodiscard]] bool cleanup_owned_registrations(
     const std::filesystem::path& local_directory,
     RegistryScope scope,
     std::wstring* error = nullptr,
     std::wstring_view registry_subkey = kRegistrySubkey,
-    std::wstring_view prefix = kManifestPrefix) noexcept;
+    std::wstring_view prefix = kManifestPrefix,
+    std::vector<std::filesystem::path>* retired = nullptr) noexcept;
 
 } // namespace xrfg::implicit_layer

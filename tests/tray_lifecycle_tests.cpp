@@ -274,7 +274,11 @@ void runtime_stop_and_watchdog() {
     SetEvent(parent); // A signalled process handle uses the identical wait path.
     watchdog.join();
     CloseHandle(parent);
-    require(cleaned && next_reader.stop_requested() && !test.registered(next), "watchdog disables reader and unregisters after owner exit");
+    // The watchdog takes the registration back and leaves the session
+    // running: a tray that crashed is no reason to end a game's generation,
+    // and the next tray adopts the session (restart_adopts_running_session).
+    require(cleaned && !next_reader.stop_requested() && !test.registered(next),
+        "watchdog unregisters after owner exit and leaves the running session generating");
     CloseHandle(event);
 
     // Missing event is fail-closed for managed DLLs; embedded INIs have no lease.
@@ -284,6 +288,36 @@ void runtime_stop_and_watchdog() {
     require(absent_reader.stop_requested(), "orphaned managed DLL starts disabled");
     xrfg::implicit_layer::ManualArmControl embedded(test.state.local_directory / L"embedded");
     require(!embedded.stop_requested(), "embedded layer without tray control unchanged");
+}
+
+// A tray restart adopts a running session: the next tray's start-up takes
+// the registration back without stopping the reader, arming reconciles again
+// without stopping it, and Quit stops it with the tray's own arm.
+void restart_adopts_running_session() {
+    Fixture test;
+    const auto manifest = test.seed(L"v069", 50);
+    HANDLE event = xrfg::implicit_layer::create_arm_signal(manifest);
+    require(event != nullptr, "create arm event");
+    require(write_runtime_configuration(test.state, nullptr, manifest), "write control configuration");
+    xrfg::implicit_layer::ManualArmControl reader(runtime_directory(test.state.local_directory));
+    require(!reader.stop_requested(), "session enabled under the earlier tray");
+    CloseHandle(event); // The earlier tray is gone; the session's handle keeps the event.
+    std::wstring error;
+    std::vector<std::filesystem::path> retired;
+    require(cleanup_all_owned_registrations(test.state, &error, &retired), "start-up cleanup");
+    adopt_retired_arms(test.state, retired);
+    require(!test.registered(manifest) && !std::filesystem::exists(manifest),
+        "start-up takes the registration back");
+    require(!reader.stop_requested(), "start-up leaves the running session generating");
+    require(test.state.adopted.size() == 1 && test.state.adopted.front().manifest == manifest,
+        "the session is adopted");
+    require(disarm_bridge(test.state, &error, false), "reconcile before arming");
+    require(!reader.stop_requested() && test.state.adopted.size() == 1,
+        "reconciling before an arm keeps the adopted session");
+    const HWND window = make_window(test.state);
+    SendMessageW(window, WM_CLOSE, 0, 0);
+    require(reader.stop_requested() && test.state.adopted.empty(), "Quit stops the adopted session");
+    require(!IsWindow(window), "Quit closes the window");
 }
 
 void integrity_scope_policy() {
@@ -312,6 +346,7 @@ int main() {
         pause_switch();
         blocked_manifest();
         runtime_stop_and_watchdog();
+        restart_adopts_running_session();
         integrity_scope_policy();
         std::cout << "V074 dual-hive registry recovery and production tray lifecycle checks passed\n";
         return 0;

@@ -296,7 +296,9 @@ enum class BridgeFlightOperation : std::uint32_t {
     // head's first move (b which input path, c 1 when locating the head
     // afterwards found it there), 2 the right controller made active (b the
     // interaction profile tried), 3 the right controller turned over (b 1) or
-    // back upright (b 0).
+    // back upright (b 0), 4 the head handed to automation (b the profile),
+    // 5 the panel script's controls set (XRFG_TEST_RUNTIME_PANEL_ROW; b the
+    // step, c 1 pressed or 0 released).
     test_runtime_device,
 };
 

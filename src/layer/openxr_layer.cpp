@@ -525,6 +525,8 @@ struct Dispatch {
     PFN_xrStringToPath test_string_to_path{};
     PFN_xrSetInputDeviceLocationEXT test_set_input_device_location{};
     PFN_xrSetInputDeviceActiveEXT test_set_input_device_active{};
+    PFN_xrSetInputDeviceStateVector2fEXT test_set_input_device_state_vector2f{};
+    PFN_xrSetInputDeviceStateFloatEXT test_set_input_device_state_float{};
     // Best-effort, like the two above: forwarded unchanged unless a Vulkan
     // session was bridged to D3D12, where the runtime's DXGI list is shown
     // to the application as Vulkan formats.
@@ -1876,10 +1878,17 @@ template <typename Call>
 // a head does, and the frame's reprojection_angle sees where it is then), and
 // XRFG_TEST_RUNTIME_FLIP_S=<period> holds the right controller
 // upside down for the first half of each period and upright for the second.
+// With the flip, XRFG_TEST_RUNTIME_PANEL_ROW=<row> works the panel's
+// controls once, a second into the first flip: the right thumbstick pushed
+// down row + 1 times (the first shows the cursor, each other moves it a
+// row), then right once, then the trigger pulled, each held 150 ms with 150
+// ms between, so the panel's setting on that row is stepped to its next
+// choice and applied. The flip's half period must leave room for it.
 struct TestRuntimeDevices {
     float sway{};  // radians
     double sway_period_ns{4.0e9};
     double flip_period_ns{};
+    int panel_row{-1};
 };
 
 [[nodiscard]] const TestRuntimeDevices& test_runtime_devices() noexcept {
@@ -1901,6 +1910,9 @@ struct TestRuntimeDevices {
         if (read(L"XRFG_TEST_RUNTIME_FLIP_S", &number) && number > 0.1) {
             value.flip_period_ns = number * 1.0e9;
         }
+        if (read(L"XRFG_TEST_RUNTIME_PANEL_ROW", &number) && number >= 0.0) {
+            value.panel_row = static_cast<int>(number);
+        }
         return value;
     }();
     return devices;
@@ -1916,10 +1928,15 @@ struct TestRuntimeDeviceSession {
     XrPosef base{};
     XrTime first{};
     XrPath head{}, head_input{}, right{}, right_grip{};
+    XrPath right_thumbstick{}, right_trigger{};
     bool head_found{}, head_failed{}, right_active{};
     std::size_t head_candidate{};
     int head_tries{};
     int flipped{-1};
+    // The panel script: the step last set and whether it was the pressed
+    // half, so the runtime is told only on a change.
+    int script_step{-1};
+    bool script_pressed{}, script_done{};
 };
 std::mutex g_test_runtime_devices_mutex;
 std::unordered_map<XrSession, TestRuntimeDeviceSession> g_test_runtime_device_sessions;
@@ -1967,6 +1984,10 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
             }
             s.first = display_time;
             s.started = true;
+            static_cast<void>(d.test_string_to_path(d.test_instance,
+                "/user/hand/right/input/thumbstick", &s.right_thumbstick));
+            static_cast<void>(d.test_string_to_path(d.test_instance,
+                "/user/hand/right/input/trigger/value", &s.right_trigger));
         }
         if (wanted.sway != 0.0F && !s.head_failed) {
             const double phase = std::fmod(static_cast<double>(display_time), wanted.sway_period_ns) /
@@ -2055,6 +2076,38 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
             if (flipped != s.flipped) {
                 s.flipped = flipped;
                 event(result, 3, static_cast<std::uint64_t>(flipped), 0);
+            }
+            // The panel script (a 5: b the step, c 1 pressed or 0 released;
+            // the result is the stick's unless it failed, then the trigger's).
+            if (wanted.panel_row >= 0 && !s.script_done && flipped &&
+                d.test_set_input_device_state_vector2f != nullptr &&
+                d.test_set_input_device_state_float != nullptr) {
+                const double in_flip = std::fmod(since, wanted.flip_period_ns) - 1.0e9;
+                const int step = in_flip < 0.0 ? -1 : static_cast<int>(in_flip / 0.3e9);
+                const bool pressed = in_flip >= 0.0 && std::fmod(in_flip, 0.3e9) < 0.15e9;
+                const int downs = wanted.panel_row + 1;
+                if (step != s.script_step || pressed != s.script_pressed) {
+                    s.script_step = step;
+                    s.script_pressed = pressed;
+                    XrVector2f stick{0.0F, 0.0F};
+                    float trigger = 0.0F;
+                    if (pressed && step >= 0 && step < downs) {
+                        stick.y = -1.0F;
+                    } else if (pressed && step == downs) {
+                        stick.x = 1.0F;
+                    } else if (pressed && step == downs + 1) {
+                        trigger = 1.0F;
+                    }
+                    const XrResult stick_result = d.test_set_input_device_state_vector2f(
+                        state.handle, s.right, s.right_thumbstick, stick);
+                    const XrResult trigger_result = d.test_set_input_device_state_float(
+                        state.handle, s.right, s.right_trigger, trigger);
+                    if (step >= 0) {
+                        event(XR_FAILED(stick_result) ? stick_result : trigger_result, 5,
+                            static_cast<std::uint64_t>(step), pressed ? 1 : 0);
+                    }
+                    if (step > downs + 1) s.script_done = true;
+                }
             }
         }
     } catch (...) {
@@ -5766,6 +5819,10 @@ XrResult layer_create_api_layer_instance_impl(
                 "xrSetInputDeviceLocationEXT", dispatch->test_set_input_device_location));
             static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
                 "xrSetInputDeviceActiveEXT", dispatch->test_set_input_device_active));
+            static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+                "xrSetInputDeviceStateVector2fEXT", dispatch->test_set_input_device_state_vector2f));
+            static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+                "xrSetInputDeviceStateFloatEXT", dispatch->test_set_input_device_state_float));
         }
         const bool d3d12_on_instance = bridge_extension_added || asked_d3d12;
         if (bridge_requested_by_ini && asked_d3d11 && d3d12_on_instance) {

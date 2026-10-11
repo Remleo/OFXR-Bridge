@@ -126,6 +126,16 @@ struct AppState {
     // with it, so every arm starts resumed; null if it could not be made.
     HANDLE pause_signal{};
     bool paused{};
+    // Sessions an earlier tray armed and still running, taken over at
+    // start-up and before arming (adopt_retired_arms) so a tray restart
+    // leaves them generating: their arm and pause events, signalled by
+    // Disarm and Exit with the tray's own and paused with it.
+    struct AdoptedArm {
+        std::filesystem::path manifest;
+        HANDLE arm{};
+        HANDLE pause{};
+    };
+    std::vector<AdoptedArm> adopted;
     // The runtime ini as the tray last wrote or adopted it, so a change the
     // headset's panel made is told from the tray's own rewrite.
     mutable std::string runtime_ini_last;
@@ -507,7 +517,8 @@ void log_lifecycle(const std::filesystem::path& local_directory,
 
 [[nodiscard]] bool cleanup_all_owned_registrations(
     const AppState& state,
-    std::wstring* error) {
+    std::wstring* error,
+    std::vector<std::filesystem::path>* retired = nullptr) {
     if (error) error->clear();
     bool success = true;
     for (const auto scope : {
@@ -515,7 +526,8 @@ void log_lifecycle(const std::filesystem::path& local_directory,
              xrfg::implicit_layer::RegistryScope::local_machine}) {
         std::wstring detail;
         if (!xrfg::implicit_layer::cleanup_owned_registrations(
-                state.local_directory, scope, &detail, state.registry_subkey)) {
+                state.local_directory, scope, &detail, state.registry_subkey,
+                xrfg::implicit_layer::kManifestPrefix, retired)) {
             success = false;
             if (error) {
                 if (!error->empty()) *error += L"\r\n";
@@ -646,15 +658,93 @@ void close_pause_signal(AppState& state) {
     state.paused = false;
 }
 
+// The sessions still running on manifests an earlier tray armed, found as
+// those manifests are taken back: this tray takes their stop and pause
+// events over instead of stopping them, since the layer's stop is terminal
+// for a session (no re-arm starts it again) and a tray restart is no reason
+// to end a game's generation. An event no session holds any more has gone
+// with its last reader; one already set was stopped on purpose.
+void adopt_retired_arms(
+    AppState& state,
+    const std::vector<std::filesystem::path>& retired) {
+    namespace layer = xrfg::implicit_layer;
+    for (const auto& manifest : retired) {
+        std::wstring error;
+        HANDLE arm = layer::open_arm_signal(manifest, &error);
+        if (arm == nullptr) {
+            if (!error.empty()) log_lifecycle(state.local_directory, L"adopt-arm", error);
+            continue;
+        }
+        if (WaitForSingleObject(arm, 0) != WAIT_TIMEOUT) {
+            CloseHandle(arm);
+            continue;
+        }
+        HANDLE pause = layer::open_pause_signal(manifest);
+        // Every arm starts resumed, the adopted ones with it.
+        if (pause) static_cast<void>(ResetEvent(pause));
+        state.adopted.push_back({manifest, arm, pause});
+        log_lifecycle(state.local_directory, L"adopt-arm " + manifest.filename().wstring());
+    }
+}
+
+// Disarm and Exit: the adopted sessions stop with the tray's own arm.
+void stop_adopted_arms(AppState& state, std::wstring* errors) {
+    for (const auto& adopted : state.adopted) {
+        if (!SetEvent(adopted.arm) && errors) {
+            if (!errors->empty()) *errors += L"\r\n";
+            *errors += last_error_message(L"Stopping an adopted OFXR session");
+        }
+        CloseHandle(adopted.arm);
+        if (adopted.pause) CloseHandle(adopted.pause);
+    }
+    if (!state.adopted.empty()) {
+        log_lifecycle(state.local_directory,
+            L"stop-adopted " + std::to_wstring(state.adopted.size()));
+    }
+    state.adopted.clear();
+}
+
+// The pause, on the tray's own arm and the adopted sessions alike.
+[[nodiscard]] bool set_pause_events(AppState& state, bool paused) {
+    if (state.pause_signal == nullptr) return false;
+    const bool ok = (paused ? SetEvent(state.pause_signal)
+                            : ResetEvent(state.pause_signal)) != FALSE;
+    for (const auto& adopted : state.adopted) {
+        if (adopted.pause)
+            static_cast<void>(paused ? SetEvent(adopted.pause) : ResetEvent(adopted.pause));
+    }
+    return ok;
+}
+
+// Stops the sessions the tray armed, its own arm's and the adopted ones, and
+// takes every owned registration back. From arm_bridge, which reconciles
+// disk and registry before arming, stop_sessions is false: nothing is
+// signalled, and sessions found running on an earlier tray's manifests are
+// adopted instead.
 [[nodiscard]] bool disarm_bridge(
     AppState& state,
-    std::wstring* error) {
+    std::wstring* error,
+    bool stop_sessions = true) {
     // Signal the active DLL BEFORE registry/file cleanup or window teardown.
     std::wstring signal_error;
-    if (state.arm_signal && !SetEvent(state.arm_signal))
+    if (stop_sessions && state.arm_signal && !SetEvent(state.arm_signal))
         signal_error = last_error_message(L"Stopping the loaded OFXR layer");
     std::wstring detail;
-    const bool cleaned = cleanup_all_owned_registrations(state, &detail);
+    std::vector<std::filesystem::path> retired;
+    const bool cleaned = cleanup_all_owned_registrations(state, &detail, &retired);
+    if (stop_sessions) {
+        // Sessions of an earlier tray that were never adopted stop as well.
+        for (const auto& manifest : retired) {
+            std::wstring stop_error;
+            if (!xrfg::implicit_layer::signal_arm_stop(manifest, &stop_error)) {
+                if (!signal_error.empty()) signal_error += L"\r\n";
+                signal_error += stop_error;
+            }
+        }
+        stop_adopted_arms(state, &signal_error);
+    } else {
+        adopt_retired_arms(state, retired);
+    }
     if (!signal_error.empty()) {
         if (!detail.empty()) detail += L"\r\n";
         detail += signal_error;
@@ -679,8 +769,9 @@ void close_pause_signal(AppState& state) {
 }
 
 [[nodiscard]] bool arm_bridge(AppState& state, std::wstring* error) {
-    // Reconcile disk/registry state, not just this tray process's memory.
-    if (!disarm_bridge(state, error)) return false;
+    // Reconcile disk/registry state, not just this tray process's memory,
+    // without stopping anything: sessions an earlier tray armed are adopted.
+    if (!disarm_bridge(state, error, false)) return false;
 
     std::filesystem::path manifest;
     std::filesystem::path vulkan_manifest;
@@ -1332,8 +1423,7 @@ void handle_command(AppState& state, UINT command) {
         break;
     case toggle_pause:
         if (!state.armed || !state.pause_signal) break;
-        if (state.paused ? ResetEvent(state.pause_signal)
-                         : SetEvent(state.pause_signal)) {
+        if (set_pause_events(state, !state.paused)) {
             state.paused = !state.paused;
             log_lifecycle(state.local_directory, state.paused ? L"pause" : L"resume");
             refresh_tray_icon(state);
@@ -1876,13 +1966,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         state.local_directory = local_app_data() / L"OFXR Bridge";
         state.settings_path = state.local_directory / L"tray.ini";
         std::wstring cleanup_error;
-        if (!cleanup_all_owned_registrations(state, &cleanup_error)) {
+        std::vector<std::filesystem::path> retired;
+        if (!cleanup_all_owned_registrations(state, &cleanup_error, &retired)) {
             log_lifecycle(state.local_directory, L"startup-cleanup", cleanup_error);
             MessageBoxW(nullptr, cleanup_error.c_str(), kApplicationName, MB_OK | MB_ICONERROR);
             CloseHandle(single_instance);
             return EXIT_FAILURE;
         }
         log_lifecycle(state.local_directory, L"startup-cleanup");
+        // Games generating under the tray that ran before keep generating.
+        adopt_retired_arms(state, retired);
         load_settings(state);
     } catch (...) {
         MessageBoxW(

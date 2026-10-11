@@ -189,6 +189,32 @@ bool signal_arm_stop(const std::filesystem::path& manifest, std::wstring* error)
     }
 }
 
+void* open_arm_signal(const std::filesystem::path& manifest, std::wstring* error) noexcept {
+    try {
+        if (error) error->clear();
+        const auto name = arm_signal_name(manifest);
+        HANDLE event = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, name.c_str());
+        if (event == nullptr) {
+            const auto status = GetLastError();
+            if (status != ERROR_FILE_NOT_FOUND && error)
+                *error = registry_error(L"Opening an earlier OFXR arm control", status);
+        }
+        return event;
+    } catch (...) {
+        if (error) *error = L"Unable to open an earlier OFXR arm control.";
+        return nullptr;
+    }
+}
+
+void* open_pause_signal(const std::filesystem::path& manifest) noexcept {
+    try {
+        const auto name = pause_signal_name(manifest);
+        return OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, name.c_str());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 ManualArmControl::ManualArmControl(const std::filesystem::path& module_directory) noexcept {
     try {
         std::array<wchar_t, 128> name{};
@@ -864,13 +890,7 @@ bool retire_manifest(
     std::wstring* error,
     std::wstring_view registry_subkey) noexcept {
     try {
-        std::wstring signal_error;
-        const bool signalled = signal_arm_stop(manifest, &signal_error);
         if (!unregister_manifest(manifest, scope, error, registry_subkey)) return false;
-        if (!signalled) {
-            if (error) *error = signal_error;
-            return false;
-        }
         const auto attributes = GetFileAttributesW(manifest.c_str());
         if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
             if (error) *error = L"Refusing to remove a directory masquerading as an OFXR manifest: " + manifest.wstring();
@@ -895,7 +915,8 @@ bool cleanup_owned_registrations(
     RegistryScope scope,
     std::wstring* error,
     std::wstring_view registry_subkey,
-    std::wstring_view prefix) noexcept {
+    std::wstring_view prefix,
+    std::vector<std::filesystem::path>* retired) noexcept {
     try {
         if (error) error->clear();
         bool success = true;
@@ -983,8 +1004,9 @@ bool cleanup_owned_registrations(
                 if (attributes != INVALID_FILE_ATTRIBUTES ||
                     (status != ERROR_FILE_NOT_FOUND && status != ERROR_PATH_NOT_FOUND))
                     fail(L"OFXR manifest not removed through an unsafe cache directory: " + manifest.wstring());
-            } else if (!retire_manifest(manifest, scope, &detail, registry_subkey)) {
-                fail(detail);
+            } else {
+                if (retired) retired->push_back(manifest);
+                if (!retire_manifest(manifest, scope, &detail, registry_subkey)) fail(detail);
             }
         }
         // Do not report Off if an owned registration survived or appeared while

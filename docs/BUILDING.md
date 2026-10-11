@@ -983,7 +983,13 @@ controller upside down for the first half of each period, and
 `XRFG_TEST_RUNTIME_HEAD_SWAY_DEG` / `_PERIOD_S` sways the head (records:
 `test_runtime_device`). With the flip, hello_xr on the simulator showed the
 status panel 0.29 s after the controller turned over and hid it 0.51 s after
-it came upright, every cycle: the gesture's input path, end to end. The
+it came upright, every cycle: the gesture's input path, end to end. With the
+flip, `XRFG_TEST_RUNTIME_PANEL_ROW=<row>` works the panel's controls once, a
+second into the first flip: the right thumbstick pushed down row + 1 times
+(the first shows the cursor), then right once, then the trigger pulled, each
+held 150 ms with 150 ms between, so the setting on that row is stepped to its
+next choice and applied (`test_runtime_device` a=5, the `status_panel` 6
+record and the runtime ini say what happened). The
 simulator accepted the head moves but did not move its head for any of the
 input paths tried, though Meta XR Operator's `openxr_set_head_pose` moves it
 on the same simulator; that tool, driven at the display rate below the layer,
@@ -1789,6 +1795,23 @@ per layer of the code, and only the last one touches the game.
   click, the simple controller keeping the grips and losing the controls,
   three sets attached, two synced without a hand); the adoption in
   `xrfg_standalone_launcher_tests`.
+- A tray restart adopts running sessions. The layer's stop is terminal for an
+  XrSession (`manual_stop_applied`), so a tray that stopped a game's session
+  while restarting left it without generation until the game restarted; a
+  tray killed together with its watchdog, or started again after a crash, did
+  exactly that: `retire_manifest` signalled every orphaned manifest's arm
+  event from `cleanup_owned_registrations` at start-up. Retiring a manifest
+  now only unregisters and removes it, and reports it (`retired`); the tray,
+  at start-up and before arming, opens each orphan's arm and pause events
+  (`open_arm_signal`, `open_pause_signal`: a live session's handle keeps the
+  kernel object alive, so an event that cannot be opened has no session) and
+  holds them as adopted (lifecycle log `adopt-arm`). Disarm and Exit signal
+  them with the tray's own (`stop-adopted`), and the pause sets and resets
+  them too. A tray that crashes therefore leaves running games generating
+  until they end or a tray is started and disarmed, while new games load
+  nothing meanwhile, since the watchdog still retires the registration.
+  `xrfg_standalone_launcher_tests` checks that retiring leaves a held event
+  unsignalled and that the adopted handle stops it.
 - The pixels are font8x8's public-domain glyphs (`THIRD_PARTY.md`), grown by
   Scale2x to 16 and 32 pixels once per process, on a 1024-wide texture with a
   rounded, bordered background. Premultiplied alpha, like the counter's;

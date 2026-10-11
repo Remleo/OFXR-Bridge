@@ -1125,6 +1125,11 @@ For everyday use:
    the game.
 4. Select **Disarm bridge**, or close the tray, when you are finished.
 
+Restarting the tray while a game is running leaves the game generating: the
+new tray takes the running session over, and **Disarm bridge** and **Exit**
+still stop it. Earlier releases stopped it for good, and only a game restart
+brought generation back.
+
 ### The tray menu
 
 The menu is grouped in the order you decide things. Its top lines say whether
