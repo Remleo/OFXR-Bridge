@@ -1624,6 +1624,28 @@ turning camera, then, native generation is the method; the hybrid's
 double on ordinary pairs is the next thing to look at in OFXR's own path,
 and extrapolation is for latency, not for this.
 
+The whole-frame replay numbers could not see her (the background is most
+of the pixels), so the harness now scores a window as well:
+`XRFG_TEST_REPLAY_REGION=eye,x0,y0,x1,y1`, fractions of that eye, every
+pixel inside, moving or not, printed as `region=` on each method's line
+(`scratchpad/region_replay.sh` runs a capture's triplets and averages it
+per method). On the four steady pairs of the hybrid run's capture, her
+head in eye 1 (0.33,0.43 to 0.44,0.58):
+
+| Method | Error over her head | Error where the scene moved |
+|---|---|---|
+| Native DLSS FG 100% / 67% | 4.78 / 4.86 | 7.68 / 7.35 |
+| OFXR hybrid (vectors + FidelityFX flow) | 5.59 | 7.46 |
+| OFXR NVIDIA medium flow | 6.37 | 7.89 |
+| OFXR FidelityFX flow, half or full | 7.12 | 8.45 |
+| Blend of the two frames | 10.82 | 11.93 |
+| The real frame repeated | 12.77 | 13.69 |
+
+So the crops and the window agree: on her, native is a sixth better than
+the hybrid and a third better than the flows, while the whole-frame
+moving error had the hybrid ahead of native. The window is the number to
+watch for anything done to the hybrid's choice between its branches.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:

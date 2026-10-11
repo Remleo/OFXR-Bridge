@@ -506,8 +506,20 @@ void replay_held_out(const std::filesystem::path& directory) {
             // image, or each slice of an array.
             double eye_moved[2]{};
             std::size_t eye_moved_count[2]{};
+            // XRFG_TEST_REPLAY_REGION=eye,x0,y0,x1,y1 (fractions of that
+            // eye): the error over that window alone, moving or not, for
+            // a character the whole-frame numbers cannot see.
+            double region = 0;
+            std::size_t region_count = 0;
         };
         std::vector<Sums> sums(std::thread::hardware_concurrency() + 1);
+        static const auto region = [] {
+            std::array<float, 5> r{-1.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+            if (const char* text = std::getenv("XRFG_TEST_REPLAY_REGION")) {
+                std::sscanf(text, "%f,%f,%f,%f,%f", &r[0], &r[1], &r[2], &r[3], &r[4]);
+            }
+            return r;
+        }();
         const UINT rows = height * slices;
         parallel(rows, [&](UINT first, UINT end, UINT thread) {
             Sums& sum = sums[thread];
@@ -520,6 +532,16 @@ void replay_held_out(const std::filesystem::path& directory) {
                     for (UINT c = 0; c < 3; ++c) e += std::abs(out_rgb[i * 3 + c] - truth_rgb[i * 3 + c]);
                     sum.all += e;
                     sum.all_count += 3;
+                    if (region[0] >= 0.0F) {
+                        const UINT eye_of = slices > 1 ? std::min<UINT>(row / height, 1) : (x >= width / 2 ? 1 : 0);
+                        const UINT eye_width = slices > 1 ? width : width / 2;
+                        const float fx = float(x - (slices > 1 ? 0 : eye_of * eye_width)) / float(eye_width);
+                        const float fy = float(y) / float(height);
+                        if (UINT(region[0]) == eye_of && fx >= region[1] && fy >= region[2] && fx < region[3] && fy < region[4]) {
+                            sum.region += e;
+                            sum.region_count += 3;
+                        }
+                    }
                     if (!moving[i]) continue;
                     sum.moved += e;
                     sum.moved_count += 3;
@@ -571,6 +593,8 @@ void replay_held_out(const std::filesystem::path& directory) {
                 total.eye_moved[eye] += s.eye_moved[eye];
                 total.eye_moved_count[eye] += s.eye_moved_count[eye];
             }
+            total.region += s.region;
+            total.region_count += s.region_count;
         }
         std::cout << "replay " << name << " mae=" << total.all / double(total.all_count)
                   << " moving=" << (total.moved_count ? total.moved / double(total.moved_count) : 0.0)
@@ -579,8 +603,9 @@ void replay_held_out(const std::filesystem::path& directory) {
                   << " sharpness=" << (total.gradient_truth > 0 ? total.gradient_out / total.gradient_truth : 1.0)
                   << " gradient_error=" << (total.gradients ? total.gradient_error / double(total.gradients) : 0.0)
                   << " eye_moving=" << (total.eye_moved_count[0] ? total.eye_moved[0] / double(total.eye_moved_count[0]) : 0.0)
-                  << ',' << (total.eye_moved_count[1] ? total.eye_moved[1] / double(total.eye_moved_count[1]) : 0.0)
-                  << '\n';
+                  << ',' << (total.eye_moved_count[1] ? total.eye_moved[1] / double(total.eye_moved_count[1]) : 0.0);
+        if (total.region_count) std::cout << " region=" << total.region / double(total.region_count);
+        std::cout << '\n';
     };
     score("repeat frame2", f2.colour);
     {
