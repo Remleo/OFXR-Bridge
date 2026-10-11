@@ -1460,7 +1460,15 @@ of the regression round were then run with native DLSS FG selected
 (release 30's layer, 100%, the camera off): Hubris, Kayak VR, Moss Book II,
 Moss, RoboQuest VR and FlatOut 4 VR all generated natively on the
 presenter at 45 real and 45 generated a second, no quarantine, no error,
-FlatOut's D3D11 bridge included.
+FlatOut's D3D11 bridge included. A second batch of native VR titles went the
+same way: Alien: Rogue Incursion VR, Into the Radius VR, The 7th Guest VR
+and Reach at 45 + 45 on the presenter (the first and the last two through
+the pipelined-wait promotion, Into the Radius through the Meta rule), Metro
+Awakening at 45 real frames and 45 pairs a second inline - a split frame
+loop, which stays inline on Meta's runtimes by design - and none with a
+quarantine. Into the Radius 2 created its session and then submitted no
+layers at all for the three minutes it was watched (a loading or launcher
+state the unattended run never left), so it was not measured.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
