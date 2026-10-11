@@ -2813,6 +2813,11 @@ struct SwapchainState {
     XrSwapchainImageReleaseInfo pending_bridge_release_info{
         XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     std::chrono::steady_clock::time_point pending_bridge_release_at{};
+    // The DLSS publication count when the application released the image:
+    // the deferred release pairs the image with the evaluation released with
+    // it, as a release run at once would, not with the other eye's that was
+    // published between the release and the xrEndFrame it waited for.
+    std::uint64_t pending_bridge_release_publication{};
     std::shared_ptr<FrameGenerationSwapchainState> frame_generation;
     // Generation costs three runtime swapchains, and a swapchain that never
     // reaches a projection layer never spends them: an application's UI quads
@@ -8015,10 +8020,15 @@ void log_history_capture_wait(
         (static_cast<std::uint64_t>(wait.limit_us) << 32) | image_index);
 }
 
+// publication_at_release: for a release deferred to the application's
+// xrEndFrame (SwapchainState::pending_bridge_release), the DLSS publication
+// count at the application's own release, so the pairing of the image with
+// its eye's evaluation is the one a release run at once would have made.
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     XrSwapchain swapchain,
-    const XrSwapchainImageReleaseInfo* release_info) {
+    const XrSwapchainImageReleaseInfo* release_info,
+    std::optional<std::uint64_t> publication_at_release = std::nullopt) {
     std::optional<std::uint32_t> candidate_index;
     std::shared_ptr<xrfg::D3D12SwapchainHistory> history;
     std::shared_ptr<xrfg::SwapchainInterop> interop;
@@ -8098,7 +8108,8 @@ XrResult release_swapchain_image_locked(
             std::scoped_lock lock(state->mutex);
             if (*candidate_index < state->enumerated_d3d12_images.size()) {
                 const int eye = state->projection_eye.load(std::memory_order_relaxed);
-                const std::uint64_t now = xrfg::dlss_motion_vector_publications();
+                const std::uint64_t now =
+                    publication_at_release.value_or(xrfg::dlss_motion_vector_publications());
                 pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
                     state->enumerated_d3d12_images[*candidate_index].Get(),
                     state->session->d3d12_queue.Get(),
@@ -8195,7 +8206,8 @@ XrResult release_swapchain_image_locked(
                     state->pending_end_frame_capture = released_index;
                 }
                 if (state->session->dlss_motion_vectors) {
-                    state->release_publication = xrfg::dlss_motion_vector_publications();
+                    state->release_publication =
+                        publication_at_release.value_or(xrfg::dlss_motion_vector_publications());
                     const int eye = state->projection_eye.load(std::memory_order_relaxed);
                     if (eye == 0 || eye == 1) {
                         state->session->eye_release_publication[static_cast<std::size_t>(eye)].store(
@@ -8255,8 +8267,8 @@ void release_pending_bridge_image_locked(
                 std::chrono::steady_clock::now() -
                 state->pending_bridge_release_at)
                 .count();
-        const XrResult result =
-            release_swapchain_image_locked(state, state->handle, &release_info);
+        const XrResult result = release_swapchain_image_locked(
+            state, state->handle, &release_info, state->pending_bridge_release_publication);
         // 4: a deferred release ran. a the swapchain, b the image, c how long
         // after the application's release. A failure is the runtime's code,
         // with b 4 for this stage and c the image.
@@ -8342,6 +8354,7 @@ XrResult layer_release_swapchain_image_impl(
         }
         state->pending_bridge_release_info = *release_info;
         state->pending_bridge_release_at = std::chrono::steady_clock::now();
+        state->pending_bridge_release_publication = xrfg::dlss_motion_vector_publications();
         return XR_SUCCESS;
     }
     return release_swapchain_image_locked(state, swapchain, release_info);
