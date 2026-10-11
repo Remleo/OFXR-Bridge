@@ -1294,7 +1294,17 @@ say more there, since native generation's frame sits at a half of the pair
 while the truth sits at a third or two thirds of an uneven one. Hence the
 rule: scale small differences, drop large ones. Live, a hitch pair and the
 pair after it (whose fit is the hitch's, at half the ratio) both go without
-the camera's motion, which is release 23's behaviour.
+the camera's motion, which is release 23's behaviour. What that looks like
+(a release-27 2X capture at the user's setting, a stall of the capture's own
+making, 27 then 50 ms frames, the background 220 to 230 pixels across the
+pair): the generated frame of the hitch pair ghosts, the character's face
+and hair half-transparent with the car behind her showing through in one
+eye and a faint doubled shop sign in the other, while the pairs around it
+are clean, their background at the half and the character crisp. A 220
+pixel step in one pair is beyond what NGX interpolates cleanly with or
+without a camera, so the dropped fit stays the conservative choice; the
+alternatives, repeating the real frame on such a pair (a stutter instead of
+a ghost) or scaling the fit, want a live sample before either is taken.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
