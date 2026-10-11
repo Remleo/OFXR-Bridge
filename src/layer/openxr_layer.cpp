@@ -1,6 +1,7 @@
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
+#include "xrfg/d3d12_queue_probe.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
 #include "xrfg/ngx_guide_capture.hpp"
 #include "xrfg/d3d11_bridge.hpp"
@@ -1205,6 +1206,7 @@ struct SessionState {
     // and the interval and slack measures as they stood.
     struct AutoPoll {
         std::uint32_t frames{}, repeats{};
+        std::uint32_t probes{}, busy{};
         double interval_ns{}, slack_ns{};
     };
     std::array<AutoPoll, 8> auto_window{};
@@ -1213,6 +1215,15 @@ struct SessionState {
     double auto_slack_ema_ns{-1.0};
     std::chrono::steady_clock::time_point auto_last_end_frame{};
     double auto_interval_ema_ns{-1.0};
+    // The game's GPU, probed from the presenter thread while the automatic
+    // choice is on (D3D12 sessions): made on the xrEndFrame thread, used on
+    // the presenter's through the atomic pointer, freed with the session,
+    // which outlives the presenter thread.
+    std::unique_ptr<xrfg::D3D12QueueProbe> game_probe;
+    std::atomic<xrfg::D3D12QueueProbe*> game_probe_live{nullptr};
+    bool game_probe_tried{};
+    std::uint64_t auto_probes_seen{};
+    std::uint64_t auto_busy_seen{};
     // The application's xrEndFrame thread only: the run of pairs that waited
     // at admission observe_admission_wait counts, how many runs long it must
     // be, and the presenter frame it adds to the next once-per-pair hold.
@@ -10730,6 +10741,10 @@ void continuous_presenter_main(
         if (!request) {
             state->auto_presenter_repeats.fetch_add(1, std::memory_order_relaxed);
         }
+        // One probe of the game's GPU a display period (automatic 2X or 3X).
+        if (auto* probe = state->game_probe_live.load(std::memory_order_acquire)) {
+            probe->probe();
+        }
         if (XR_SUCCEEDED(end_result) && state->presenter_display_period > 0) {
             state->runtime_slowed.store(
                 frame_state.predictedDisplayPeriod >
@@ -13869,43 +13884,70 @@ void follow_synthetic_pose(SessionState& state) noexcept {
 // compiled, a level loaded - moves nothing: live in Stellar Blade a
 // start-up stall at 2.0 periods with a period of slack had sent the first
 // build to 3X for four seconds.
+//
+// The slack alone cannot say that a game could hold 2X again. Paced to a
+// third of the rate, a GPU-bound game no longer waits on its own GPU inside
+// the engine, so its CPU thread reaches the pair hold early: Stellar Blade
+// at 38 frames a second read 1.9 periods of slack at 3X and the build that
+// judged by slack flapped between 2X and 3X every four seconds. So the game's
+// GPU is probed from the presenter thread (D3D12QueueProbe, once a display
+// period): the share of probes that found it busy, times the game's frame
+// interval, is its GPU time a frame, and 2X comes back only when that is
+// under 1.85 periods as well. Without a probe (another binding, or a queue
+// that cannot be calibrated) the slack decides alone, after twenty seconds.
 [[nodiscard]] std::uint32_t automatic_frame_multiplier(
     SessionState& state,
     std::chrono::steady_clock::time_point now) noexcept {
     const std::uint32_t current = state.frames_per_application_frame;
     const std::uint64_t frames = state.auto_presenter_frames.load(std::memory_order_relaxed);
     const std::uint64_t repeats = state.auto_presenter_repeats.load(std::memory_order_relaxed);
+    const auto* probe = state.game_probe_live.load(std::memory_order_acquire);
+    const xrfg::D3D12QueueProbe::Counts counts = probe ? probe->counts() : xrfg::D3D12QueueProbe::Counts{};
     state.auto_window[state.auto_window_next] = {
         static_cast<std::uint32_t>(frames - state.auto_frames_seen),
         static_cast<std::uint32_t>(repeats - state.auto_repeats_seen),
+        static_cast<std::uint32_t>(counts.probes - state.auto_probes_seen),
+        static_cast<std::uint32_t>(counts.busy - state.auto_busy_seen),
         state.auto_interval_ema_ns, state.auto_slack_ema_ns};
     state.auto_window_next = (state.auto_window_next + 1) % state.auto_window.size();
     state.auto_window_filled = std::min(state.auto_window_filled + 1, state.auto_window.size());
     state.auto_frames_seen = frames;
     state.auto_repeats_seen = repeats;
+    state.auto_probes_seen = counts.probes;
+    state.auto_busy_seen = counts.busy;
     const double period = static_cast<double>(state.presenter_display_period);
     if (state.auto_window_filled < state.auto_window.size() || period <= 0.0 ||
         state.runtime_slowed.load(std::memory_order_relaxed) || state.auto_slack_ema_ns < 0.0) {
         return current;
     }
-    std::uint64_t shown = 0, repeated = 0;
+    std::uint64_t shown = 0, repeated = 0, probes = 0, busy = 0;
     bool slow_throughout = true, spare_throughout = true;
     for (const auto& poll : state.auto_window) {
         shown += poll.frames;
         repeated += poll.repeats;
+        probes += poll.probes;
+        busy += poll.busy;
         slow_throughout = slow_throughout && poll.interval_ns > 2.15 * period &&
             poll.slack_ns >= 0.0 && poll.slack_ns < 0.25 * period;
         spare_throughout = spare_throughout && poll.slack_ns > 1.15 * period;
     }
     const double repeat_share = shown ? static_cast<double>(repeated) / static_cast<double>(shown) : 0.0;
+    // The GPU's busy share over the window, and the game's GPU time a frame
+    // it implies; unknown with too few probes.
+    const bool probed = probes >= 32;
+    const double gpu_share = probed ? static_cast<double>(busy) / static_cast<double>(probes) : -1.0;
+    const double gpu_frame_ns = probed ? gpu_share * std::max(state.auto_interval_ema_ns, 0.0) : -1.0;
     const auto dwell = now - state.frames_auto_since;
-    // 1700, each poll: a the repeats in a thousand shown over the window,
-    // b the game's slack a frame in microseconds, c the frames now in the
-    // high word and the game's frame interval in microseconds in the low.
+    // 1700, each poll: a the GPU's busy share in a thousand in the high half
+    // (65535 unknown) and the repeats in a thousand shown over the window in
+    // the low, b the game's slack a frame in microseconds, c the frames now
+    // in the high word and the game's frame interval in microseconds in the
+    // low.
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         1700,
-        static_cast<std::uint64_t>(repeat_share * 1000.0),
+        ((probed ? static_cast<std::uint64_t>(gpu_share * 1000.0) : 65535ULL) << 16) |
+            static_cast<std::uint64_t>(repeat_share * 1000.0),
         static_cast<std::uint64_t>(std::max(state.auto_slack_ema_ns, 0.0) / 1000.0),
         (static_cast<std::uint64_t>(current) << 32) |
             static_cast<std::uint32_t>(std::max(state.auto_interval_ema_ns, 0.0) / 1000.0));
@@ -13915,8 +13957,14 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     if (current == 2U && dwell >= std::chrono::seconds(3) && slow_throughout) {
         return 3U;
     }
-    if (current == 3U && dwell >= std::chrono::seconds(4) && spare_throughout) {
-        return 2U;
+    if (current == 3U && spare_throughout) {
+        if (probe != nullptr) {
+            if (probed && gpu_frame_ns < 1.85 * period && dwell >= std::chrono::seconds(4)) {
+                return 2U;
+            }
+        } else if (dwell >= std::chrono::seconds(20)) {
+            return 2U;
+        }
     }
     return current;
 }
@@ -13968,6 +14016,19 @@ void apply_live_frame_multiplier(
         std::uint32_t target = xrfg::implicit_layer::read_triple_frame_gen(directory) && !limited ? 3U : 2U;
         std::uint64_t reason = 2;
         if (automatic && use_continuous_presenter && !limited) {
+            if (!state->game_probe_tried) {
+                // The game's GPU, probed on its own queue; a bridged session's
+                // queue is the layer's, which says nothing about the game.
+                state->game_probe_tried = true;
+                if (state->graphics_binding == SessionGraphicsBinding::d3d12 && state->d3d12_device &&
+                    state->d3d12_queue) {
+                    auto probe = std::make_unique<xrfg::D3D12QueueProbe>();
+                    if (SUCCEEDED(probe->initialize(state->d3d12_device.Get(), state->d3d12_queue.Get()))) {
+                        state->game_probe = std::move(probe);
+                        state->game_probe_live.store(state->game_probe.get(), std::memory_order_release);
+                    }
+                }
+            }
             target = automatic_frame_multiplier(*state, now);
             reason = 3;
         }

@@ -560,14 +560,14 @@ int main(int argc, char** argv) {
                 }
                 std::cerr << what << ": " << shown << " shown, " << repeats << " repeats, " << switches
                           << " switches, " << polls.size() << " polls" << std::endl;
-                for (std::size_t i = polls.size() > 12 ? polls.size() - 12 : 0; i < polls.size(); ++i)
+                for (std::size_t i = polls.size() > 4 ? polls.size() - 4 : 0; i < polls.size(); ++i)
                     std::cerr << "  " << polls[i] << std::endl;
             };
             const auto up = frames_until(kFakeDisplayPeriod * 3, 25, 15, "slow frames");
             if (!up.first) explain("slow frames");
             require(up.first, "a game under half the refresh rate is given 3X");
             const auto down = frames_until(kFakeDisplayPeriod * 2, 2, 15, "fast frames");
-            if (!down.first) explain("fast frames");
+            explain(down.first ? "polls" : "fast frames");
             require(down.first, "a game with a period to spare at 3X is given 2X back");
             std::cout << "auto-frames: 3X after " << up.second << " s, 2X back after "
                       << down.second << " s" << std::endl;

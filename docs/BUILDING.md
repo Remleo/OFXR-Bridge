@@ -1406,7 +1406,26 @@ build judged the averages as they stood at the poll, and a start-up stall
 in Stellar Blade on the OpenXR Simulator (2.0 periods and a period of
 slack a poll earlier) sent it to 3X at 14 s and back at 18 s, and a console
 command's hiccup did the same at 243 s; replayed over the polls of that
-log, the sustained rule fires on neither. Every poll writes `presenter_transition` 1700
+log, the sustained rule fires on neither.
+
+The slack alone cannot say that a game could hold 2X again. Stellar Blade
+at the user's UEVR scale 1.233 (3703x3703 per eye on the OpenXR Simulator,
+38 frames a second) went to 3X correctly, read 1.9 periods of slack there,
+came back after the dwell, and flapped every four seconds, 35 switches in
+140 s: paced to a third of the rate, a GPU-bound game no longer waits on
+its own GPU inside the engine, so its CPU thread reaches the pair hold
+early, and the slack measures CPU headroom. The game's GPU is therefore
+probed on its own queue (`D3D12QueueProbe`, `src/d3d12/d3d12_queue_probe.cpp`):
+once a display period the presenter thread submits a timestamp query, and
+the query's GPU time against the CPU time of its submission, through the
+queue's clock calibration (refreshed every second), says whether the queue
+was ahead of the GPU by more than 0.3 ms, busy, or not, idle. The share of
+busy probes over the window, times the game's frame interval, is its GPU
+time a frame; 2X comes back only when that is under 1.85 periods as well as
+the slack over 1.15. D3D12 sessions only, since a bridged session's queue
+is the layer's own; without a probe the slack decides alone after twenty
+seconds at 3X. The 1700 record's a carries the busy share in a thousand in
+its high half (65535 when unknown). Every poll writes `presenter_transition` 1700
 (a repeats in a thousand shown, b slack in microseconds, c the shape in
 the high word and the interval in microseconds in the low), and a switch
 writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application
