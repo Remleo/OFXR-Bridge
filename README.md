@@ -119,13 +119,15 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   through, with the game's own DLSS-G library (310.1.0) and the newer one
   (310.9.1) alike, the shared side-by-side feature less often than a
   feature per eye; OFXR's hybrid draws two half-transparent copies of her
-  side by side, body and all. No setting removes it. So a pair whose frame
-  time runs over 1.55 times the median of the eight before it is not
-  generated: the real frame is shown instead, one repeated frame where the
-  game hitched anyway; a step under six milliseconds over the median is
-  left alone. `XRFG_HITCH_SKIP=0` in the game's environment turns
-  it off (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check,
-  which reads DLSS's frame time). Leave **DLSS Frame Generation camera
+  side by side, body and all. No setting removes it. So a pair whose step
+  runs over 1.55 times the median of the eight before it is not generated:
+  the real frame is shown instead, one repeated frame where the game
+  hitched anyway; a step under six milliseconds over the median is left
+  alone. The step is the game's own frame time where it gives DLSS one
+  (the one that doubles: a stall during a frame shows in the next frame's
+  step), and otherwise the frames' arrival, taken one pair later for the
+  same reason. `XRFG_HITCH_SKIP=0` in the game's environment turns it off
+  (`XRFG_NATIVE_DLSSG_HITCH_SKIP=0` the native path's own check). Leave **DLSS Frame Generation camera
   motion** off for such games; its feature per eye ghosts more of these
   pairs.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic

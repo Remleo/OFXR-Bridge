@@ -1417,8 +1417,23 @@ with B and B goes to its current destination as usual (`record_repeat_pair`,
 the native path's skipped-pair ending factored out); the flight log
 writes `synthesis_pair` 777 with the pair's time, the median and the
 serial. `XRFG_HITCH_SKIP=0` turns it off; the native path's own check on
-DLSS's frame time stays behind it as a second line. The confirmation is
-the same wide recipe on the hybrid.
+DLSS's frame time stays behind it as a second line.
+
+The first build keyed on arrival alone and the wide recipe on the hybrid
+(`hitch_ofxr_skip`, 84 records) showed it one frame early: the 50 ms pair
+was skipped and shown as B, but two normal pairs before stalls were skipped
+too, and two 42 to 44 ms pairs after them were generated with her double
+image. An engine samples its delta time at the start of a frame, so a
+stall during frame N shows in N+1's step, while N is the frame that
+arrives late; the DLSS frame time the native check reads is the step the
+game measured, which is why it lands on the right pair (on the user's
+configuration the same run had every hitch pair shown as B through that
+second check, plus a normal pair skipped before each by the first). Now
+the layer's rule takes B's frame time wherever a guide carries it
+(`frame_time_known`), and without a guide takes the arrival gap and marks
+the pair after a late frame (`skip_next_pair`; 778 in the log against 777
+for a step from the game's own time). The confirmation is the same recipe
+on the hybrid and on the user's configuration again.
 
 A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
 the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the

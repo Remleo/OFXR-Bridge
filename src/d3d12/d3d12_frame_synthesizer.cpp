@@ -979,6 +979,9 @@ struct D3D12FrameSynthesizer::Impl {
     bool native_pair_generated{};
     // The last pair was shown as its real frame by the hitch rule below.
     bool pair_repeated{};
+    // Without a guide's frame time, a frame that arrived late marks the
+    // pair after it: the one whose step spans the stall.
+    bool skip_next_pair{};
     // The hitch rule, for every method: the last eight pairs' frame times
     // (from the sources' arrival), the median they give, and the pairs it
     // has shown as their real frame. XRFG_HITCH_SKIP=0 turns it off.
@@ -4035,29 +4038,68 @@ struct D3D12FrameSynthesizer::Impl {
         // D3D12NativeDlssG's own rule, which reads DLSS's frame time), and
         // OFXR's hybrid, live in Stellar Blade under the same forced hitches,
         // drew two half-transparent copies of her side by side, at A's and
-        // B's places, body and all. The pair's frame time here is the time
-        // between the two frames' arrival in the synthesizer, against the
-        // median of the eight pairs before, so the flow-only methods are
-        // covered too; over 1.55 times the median, and at least six
-        // milliseconds over it - under half a display period no doubled
-        // step can show, and a menu at two hundred frames a second jitters
-        // by more than its ratio - the real frame it is. One repeated frame
-        // where the game hitched anyway.
-        if (hitch_skip_enabled() &&
-            previous_source.captured_at != std::chrono::steady_clock::time_point{} &&
-            current_source.captured_at > previous_source.captured_at) {
-            const float dt_ms = std::chrono::duration<float, std::milli>(
-                current_source.captured_at - previous_source.captured_at).count();
-            const float median = pair_frame_times_count >= 4 ? pair_frame_time_median() : 0.0F;
-            note_pair_frame_time(dt_ms);
-            if (median > 0.0F && dt_ms > 1.55F * median && dt_ms - median >= 6.0F) {
+        // B's places, body and all. The step that doubles is the one the
+        // game measured: an engine samples its delta time at the start of a
+        // frame, so a stall during frame N shows in N+1's step while N is
+        // the frame that arrives late - keyed on arrival alone, the rule
+        // skipped the pair before the jump and generated the jump (the
+        // peer's hitch_ofxr_skip run). So where the game gives DLSS its
+        // frame time the pair's step is B's frame time, as the native check
+        // reads it; without a guide it is the time between the two frames'
+        // arrival, and a late arrival marks the pair after it. Either way
+        // against the median of the eight pairs before: over 1.55 times the
+        // median, and at least six milliseconds over it - under half a
+        // display period no doubled step can show, and a menu at two
+        // hundred frames a second jitters by more than its ratio - the real
+        // frame it is. One repeated frame where the game hitched anyway.
+        if (hitch_skip_enabled()) {
+            float step_ms = 0.0F;
+            bool content_time = false;
+            if (current_source.motion_vectors) {
+                const auto& set = *current_source.motion_vectors;
+                for (UINT eye = 0; eye < std::min(set.eye_count, kDlssMotionVectorEyeCount); ++eye) {
+                    const auto& frame = set.eyes[eye];
+                    if (frame && frame->frame_time_known && frame->frame_time_delta_ms > 0.0F &&
+                        std::isfinite(frame->frame_time_delta_ms)) {
+                        step_ms = frame->frame_time_delta_ms;
+                        content_time = true;
+                        break;
+                    }
+                }
+            }
+            if (!content_time &&
+                previous_source.captured_at != std::chrono::steady_clock::time_point{} &&
+                current_source.captured_at > previous_source.captured_at) {
+                step_ms = std::chrono::duration<float, std::milli>(
+                    current_source.captured_at - previous_source.captured_at).count();
+            }
+            bool skip_now = false;
+            std::uint64_t record = 0;
+            float median = 0.0F;
+            if (step_ms > 0.0F) {
+                median = pair_frame_times_count >= 4 ? pair_frame_time_median() : 0.0F;
+                note_pair_frame_time(step_ms);
+                const bool hitch = median > 0.0F && step_ms > 1.55F * median && step_ms - median >= 6.0F;
+                if (content_time) {
+                    skip_now = hitch;
+                    record = 777;
+                } else {
+                    skip_now = skip_next_pair;
+                    skip_next_pair = hitch;
+                    record = 778;
+                }
+            } else {
+                skip_next_pair = false;
+            }
+            if (skip_now) {
                 ++hitch_skips;
                 pair_repeated = true;
-                // 777 on synthesis_pair: a the pair's frame time in
-                // microseconds, b the median, c the frame's serial.
+                // 777 on synthesis_pair: the pair's step from the game's own
+                // frame time; 778: a late arrival, the pair after it. a the
+                // step in microseconds, b the median, c the frame's serial.
                 bridge_flight_logger().event(
-                    BridgeFlightOperation::synthesis_pair, 777,
-                    static_cast<std::uint64_t>(dt_ms * 1000.0F),
+                    BridgeFlightOperation::synthesis_pair, record,
+                    static_cast<std::uint64_t>(step_ms * 1000.0F),
                     static_cast<std::uint64_t>(median * 1000.0F),
                     current_source.ticket.serial);
                 return record_repeat_pair(slot, current_source, synthetic_destination_index,
