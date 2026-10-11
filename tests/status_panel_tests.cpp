@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
         input.rates = {73.6f, 36.8f, 36.8f, 16.4f, 120.0f, -1.0f, true};
         text = status_panel_text(input);
         require(line_labelled(text, "Pace").text ==
-                        "game 37/s is under the 60 that 2X needs at 120 Hz, so frames repeat: try 3X or a lower refresh rate" &&
+                        "game 37/s is under the 60 that 2X needs at 120 Hz, so frames repeat: try 3X, Automatic, or a lower refresh rate" &&
                     line_labelled(text, "Pace").tone == PanelTone::warn,
                 "pace line");
         require(text.state == "GENERATING", "a short game is not a fallback");

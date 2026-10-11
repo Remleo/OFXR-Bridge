@@ -1398,9 +1398,14 @@ judged, since a starved presenter repeats on one runtime and waits on
 another (the fake runtime of the tests shows no repeat at all). The rule
 (`automatic_frame_multiplier`): at 2X, after three seconds in the shape,
 an interval over 2.15 display periods with under a quarter period of
-slack goes to 3X; at 3X, after four seconds, slack over 1.15 periods a
-frame goes back to 2X; nothing while SteamVR halves the rate, and each
-switch resets the measures. Every poll writes `presenter_transition` 1700
+slack at every poll of the two-second window goes to 3X; at 3X, after
+four seconds, slack over 1.15 periods a frame at every poll goes back to
+2X; a frame's interval counts as four periods at most; nothing while
+SteamVR halves the rate, and each switch resets the measures. The first
+build judged the averages as they stood at the poll, and a start-up stall
+in Stellar Blade on the OpenXR Simulator (2.0 periods and a period of
+slack a poll earlier) sent it to 3X at 14 s and back at 18 s; sustained
+over the window, the same log moves nothing. Every poll writes `presenter_transition` 1700
 (a repeats in a thousand shown, b slack in microseconds, c the shape in
 the high word and the interval in microseconds in the low), and a switch
 writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application

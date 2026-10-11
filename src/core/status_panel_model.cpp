@@ -665,7 +665,8 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
                              "game " + whole(input.rates.game) + "/s is under the " + whole(needed) +
                                  " that " + std::to_string(running.frames) + "X needs at " +
                                  whole(input.rates.refresh_hz) + " Hz, so frames repeat: try " +
-                                 (triple ? "3X or a lower refresh rate" : "a lower refresh rate"),
+                                 (triple ? "3X, Automatic, or a lower refresh rate"
+                                         : "a lower refresh rate"),
                              PanelTone::warn});
         }
     }

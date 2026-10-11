@@ -1201,7 +1201,13 @@ struct SessionState {
     std::atomic<std::int64_t> auto_frame_slack_ns{};
     std::uint64_t auto_frames_seen{};
     std::uint64_t auto_repeats_seen{};
-    std::array<std::pair<std::uint32_t, std::uint32_t>, 8> auto_window{};
+    // One entry a poll: presenter frames and repeats since the poll before,
+    // and the interval and slack measures as they stood.
+    struct AutoPoll {
+        std::uint32_t frames{}, repeats{};
+        double interval_ns{}, slack_ns{};
+    };
+    std::array<AutoPoll, 8> auto_window{};
     std::size_t auto_window_filled{};
     std::size_t auto_window_next{};
     double auto_slack_ema_ns{-1.0};
@@ -13858,7 +13864,11 @@ void follow_synthetic_pose(SessionState& state) noexcept {
 // run over 1.15 periods a frame, it goes back to 2X. Three seconds in a
 // shape before leaving it, four at 3X, and nothing while SteamVR halves the
 // rate. The repeats are counted for the record (1700) but not judged: a
-// starved presenter repeats on one runtime and waits on another.
+// starved presenter repeats on one runtime and waits on another. Each
+// condition must hold at every poll of the window, so a stall - a shader
+// compiled, a level loaded - moves nothing: live in Stellar Blade a
+// start-up stall at 2.0 periods with a period of slack had sent the first
+// build to 3X for four seconds.
 [[nodiscard]] std::uint32_t automatic_frame_multiplier(
     SessionState& state,
     std::chrono::steady_clock::time_point now) noexcept {
@@ -13867,7 +13877,8 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     const std::uint64_t repeats = state.auto_presenter_repeats.load(std::memory_order_relaxed);
     state.auto_window[state.auto_window_next] = {
         static_cast<std::uint32_t>(frames - state.auto_frames_seen),
-        static_cast<std::uint32_t>(repeats - state.auto_repeats_seen)};
+        static_cast<std::uint32_t>(repeats - state.auto_repeats_seen),
+        state.auto_interval_ema_ns, state.auto_slack_ema_ns};
     state.auto_window_next = (state.auto_window_next + 1) % state.auto_window.size();
     state.auto_window_filled = std::min(state.auto_window_filled + 1, state.auto_window.size());
     state.auto_frames_seen = frames;
@@ -13878,9 +13889,13 @@ void follow_synthetic_pose(SessionState& state) noexcept {
         return current;
     }
     std::uint64_t shown = 0, repeated = 0;
-    for (const auto& [f, r] : state.auto_window) {
-        shown += f;
-        repeated += r;
+    bool slow_throughout = true, spare_throughout = true;
+    for (const auto& poll : state.auto_window) {
+        shown += poll.frames;
+        repeated += poll.repeats;
+        slow_throughout = slow_throughout && poll.interval_ns > 2.15 * period &&
+            poll.slack_ns >= 0.0 && poll.slack_ns < 0.25 * period;
+        spare_throughout = spare_throughout && poll.slack_ns > 1.15 * period;
     }
     const double repeat_share = shown ? static_cast<double>(repeated) / static_cast<double>(shown) : 0.0;
     const auto dwell = now - state.frames_auto_since;
@@ -13897,11 +13912,10 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     if (state.auto_interval_ema_ns < 0.0) {
         return current;
     }
-    if (current == 2U && dwell >= std::chrono::seconds(3) &&
-        state.auto_interval_ema_ns > 2.15 * period && state.auto_slack_ema_ns < 0.25 * period) {
+    if (current == 2U && dwell >= std::chrono::seconds(3) && slow_throughout) {
         return 3U;
     }
-    if (current == 3U && dwell >= std::chrono::seconds(4) && state.auto_slack_ema_ns > 1.15 * period) {
+    if (current == 3U && dwell >= std::chrono::seconds(4) && spare_throughout) {
         return 2U;
     }
     return current;
@@ -13922,10 +13936,14 @@ void apply_live_frame_multiplier(
             state->auto_slack_ema_ns = state->auto_slack_ema_ns < 0.0
                 ? static_cast<double>(slack)
                 : state->auto_slack_ema_ns * 0.9 + static_cast<double>(slack) * 0.1;
-            // The game's frame interval, xrEndFrame to xrEndFrame.
+            // The game's frame interval, xrEndFrame to xrEndFrame; a stall
+            // counts as four periods at most, so one does not swing the
+            // average by itself.
             if (state->auto_last_end_frame != std::chrono::steady_clock::time_point{}) {
-                const double interval = static_cast<double>(
+                double interval = static_cast<double>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(now - state->auto_last_end_frame).count());
+                const double period = static_cast<double>(state->presenter_display_period);
+                if (period > 0.0) interval = std::min(interval, 4.0 * period);
                 state->auto_interval_ema_ns = state->auto_interval_ema_ns < 0.0
                     ? interval : state->auto_interval_ema_ns * 0.9 + interval * 0.1;
             }
