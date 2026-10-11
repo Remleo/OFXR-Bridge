@@ -106,7 +106,11 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   Blade turns about the character the error where the scene moved fell from
   9.1 to 8.0 on fast turns and from 9.4 to 9.0 on slower ones. It needs an
   NGX feature per eye, so it costs about a quarter more GPU time (2.5
-  against 2.0 ms a pair at 3004x3004), and is off by default.
+  against 2.0 ms a pair at 3004x3004), and is off by default. The fit
+  reaches NGX a pair late, so a pair whose frame time differs from the
+  pair before's by more than a third (a game hitch, a loading stall) goes
+  without it, as if the option were off, rather than with a motion that no
+  longer fits; within a third the fit is scaled by the ratio.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
   Racer's menu and a race with the head made to sway 20 degrees (up to 42
   degrees a second), the error where the scene moved was 2.2 in the menu and

@@ -1263,6 +1263,39 @@ screen's, with 360 inliers and translations of thousands - at 3.51 ms a
 pair against 2.32 for the shared feature, and the game went from 43.9 to
 41.6 frames a second.
 
+The fit is a pair late, and the game's frames do not keep their time. In a
+release-24 orbit on the OpenXR Simulator one pair spanned a 50 ms game hitch
+between 26 ms pairs: the scene moved 241 pixels where its neighbours moved
+107 to 115, the pair got the pair before's fit, and the generated frame
+doubled a background sign in both eyes, its scene about 25 pixels along
+where 120 belonged. `fitted_motion` now takes the current pair's guide
+frame time against the one recorded with the fit (`CameraMotion::dt_ms`):
+within a ratio of 0.75 to 1.33 the fit's rotation angle and translation are
+scaled by the ratio, beyond it the pair goes without the camera's motion
+(`kFitScaleMin`, `kFitScaleMax`; the decision log writes the ratio when it
+leaves 0.9 to 1.1). Replayed with the fit taken from the pair before as live
+(`XRFG_TEST_REPLAY_NATIVE_FIT_PREVIOUS=1`, which seeds with frame -1 to
+frame 0 and reads that fit back; the generating pair spans two frame times,
+so its ratio is about two; `XRFG_TEST_NATIVE_FIT_SCALE=0` uses the fit
+unscaled), error where the scene moved, 100%:
+
+| Triplet | No camera | Own fit | Pair before's fit, unscaled | Scaled |
+|---|---|---|---|---|
+| r24_turn f1 (26 + 50 ms) | 9.51 | 9.75 | 9.69 | 9.79 |
+| r24_turn f2 (50 + 26 ms) | 9.77 | 9.97 | 9.81 | 10.06 |
+| user_rot5 seq0 f1 (26 + 50 ms) | 14.27 | 14.48 | 13.14 | 14.35 |
+| user_rot5 seq1 f1 (26 + 25 ms) | 8.30 | 7.13 | 9.18 | 8.05 |
+| user_rot5 seq3 f1 (26 + 26 ms) | 6.23 | 6.49 | 7.90 | 6.68 |
+| Simulator fast turns, 67%, mean of 4 | 9.10 | 8.00 | 7.88 | 7.94 |
+
+On the evenly paced pairs the scaled fit lands between the unscaled one and
+the pair's own; on the hitch pairs no fit beats none, and the replay cannot
+say more there, since native generation's frame sits at a half of the pair
+while the truth sits at a third or two thirds of an uneven one. Hence the
+rule: scale small differences, drop large ones. Live, a hitch pair and the
+pair after it (whose fit is the hitch's, at half the ratio) both go without
+the camera's motion, which is release 23's behaviour.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:

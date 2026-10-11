@@ -230,6 +230,14 @@ void replay_held_out(const std::filesystem::path& directory) {
     const int guide_shift = std::getenv("XRFG_TEST_REPLAY_GUIDE_SHIFT")
         ? std::atoi(std::getenv("XRFG_TEST_REPLAY_GUIDE_SHIFT")) : 0;
     const ReplayFrame f2_guides = guide_shift ? load_replay_frame(frame_dir(b_index + guide_shift)) : f2;
+    // XRFG_TEST_REPLAY_NATIVE_FIT_PREVIOUS=1 (with NATIVE_GPU_FIT) gives the
+    // generating pair the fit of the pair before it, as live: the seeding
+    // pair is then frame -1 to frame 0 with frame 0's own vectors, its fit is
+    // read back, and the generating pair, which spans two frame times, gets
+    // it scaled by the frame times (XRFG_TEST_NATIVE_FIT_SCALE=0: unscaled).
+    const bool fit_previous = std::getenv("XRFG_TEST_REPLAY_NATIVE_FIT_PREVIOUS") != nullptr && first >= 1;
+    const std::optional<ReplayFrame> f_previous =
+        fit_previous ? std::optional<ReplayFrame>(load_replay_frame(frame_dir(-1))) : std::nullopt;
     const UINT width = f0.colour.width, height = f0.colour.height;
     const UINT slices = f0.colour.array_size;
     std::cout << "replay " << directory.string() << ": " << width << "x" << height << "x" << slices
@@ -372,6 +380,8 @@ void replay_held_out(const std::filesystem::path& directory) {
             g->previous_serial = serial - 1;
             g->scale_x *= scale;
             g->scale_y *= scale;
+            // Vectors scaled to reach A span that much more time as well.
+            g->frame_time_delta_ms = frame.guides[e].frame_time_delta_ms * scale;
             if (previous) {
                 g->previous_jitter_x = previous->guides[e].jitter_x;
                 g->previous_jitter_y = previous->guides[e].jitter_y;
@@ -383,8 +393,9 @@ void replay_held_out(const std::filesystem::path& directory) {
                 auto found = uploaded.find(name);
                 if (found != uploaded.end()) return found->second;
                 xrfg::DumpedTexture t;
-                require(xrfg::read_dumped_texture(frame_dir(&frame == &f0 ? 0 : b_index + guide_shift) / name, &t),
-                        "replay: guide " + name);
+                const int guide_frame = &frame == &f0 ? 0
+                    : (f_previous && &frame == &*f_previous) ? -1 : b_index + guide_shift;
+                require(xrfg::read_dumped_texture(frame_dir(guide_frame) / name, &t), "replay: guide " + name);
                 auto r = upload_dumped(fixture, t, D3D12_RESOURCE_FLAG_NONE,
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -1104,10 +1115,34 @@ void replay_held_out(const std::filesystem::path& directory) {
         auto seed_b = make_guides(f0, 2, 1.0F, nullptr);
         auto moved = make_guides(f2_guides, 3, vector_scale, &f0);
         HRESULT seeded = E_FAIL, generated = E_FAIL;
-        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
-            seeded = native.record(list, 0, a.Get(), a.Get(), native_a, native_a, seed_a.get(), seed_b.get(),
-                                   outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        });
+        const auto fence_fits = [&] {
+            // The work is done; a fence signalled now says so to the native
+            // object, which reads the fit back before the next pair.
+            ComPtr<ID3D12Fence> fence;
+            require_hresult(fixture.device()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)),
+                            "replay fit fence");
+            require_hresult(fixture.queue()->Signal(fence.Get(), 1), "replay fit signal");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+            native.submitted(fence.Get(), 1);
+        };
+        if (gpu_fit && fit_previous) {
+            // The pair before, frame -1 to frame 0, seeds and is fitted.
+            auto previous = upload_dumped(fixture, f_previous->colour, colour_flags, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            auto previous_guides = make_guides(*f_previous, 1, 1.0F, nullptr);
+            auto a_from_previous = make_guides(f0, 2, 1.0F, &*f_previous);
+            const std::span<const xrfg::D3D12ReprojectionView> views_previous(f_previous->views);
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                seeded = native.record(list, 0, previous.Get(), a.Get(), views_previous, native_a,
+                                       previous_guides.get(), a_from_previous.get(), outputs,
+                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+            fence_fits();
+        } else {
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                seeded = native.record(list, 0, a.Get(), a.Get(), native_a, native_a, seed_a.get(), seed_b.get(),
+                                       outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+        }
         for (std::size_t e = 0; e < camera_fits.size(); ++e) {
             if (camera_fits[e]) {
                 native.set_test_camera_motion(UINT(e), &camera_fits[e]->clip.m[0][0],
@@ -1119,18 +1154,14 @@ void replay_held_out(const std::filesystem::path& directory) {
                                       outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
         });
         if (gpu_fit && generated == S_OK) {
-            // The work is done; a fence signalled now says so to the native
-            // object, which reads the fit back before the next pair.
-            ComPtr<ID3D12Fence> fence;
-            require_hresult(fixture.device()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)),
-                            "replay fit fence");
-            require_hresult(fixture.queue()->Signal(fence.Get(), 1), "replay fit signal");
-            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
-            native.submitted(fence.Get(), 1);
-            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
-                generated = native.record(list, 0, a.Get(), b.Get(), native_a, views2, seed_b.get(), moved.get(),
-                                          outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            });
+            if (!fit_previous) {
+                // The same pair again, with its own fit.
+                fence_fits();
+                fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                    generated = native.record(list, 0, a.Get(), b.Get(), native_a, views2, seed_b.get(), moved.get(),
+                                              outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                });
+            }
             for (UINT eye = 0; eye < 2; ++eye) {
                 if (const auto fit = native.last_camera_fit(eye)) {
                     std::cout << "replay native gpu fit eye " << eye << ": " << fit->degrees << " degrees, translation "

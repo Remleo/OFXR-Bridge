@@ -93,6 +93,15 @@ constexpr UINT kFitPoints = 32 * 32;
 constexpr UINT kFitMinInliers = kFitPoints / 4;
 constexpr float kFitMaxResidual = 48.0F;
 constexpr std::int64_t kFitMaxBehind = 2;
+// A fit measures the pair before the one it is used on. The camera turns on
+// at its rate while the game's frames do not keep theirs: a hitch doubles a
+// pair's motion (Stellar Blade: 241 pixels over a 50 ms pair between 26 ms
+// pairs of 107 to 115), and live the pair before's fit then doubled the
+// background in the generated frame. Within these ratios of the two pairs'
+// frame times the fit is scaled by the ratio; beyond them it is dropped and
+// the pair goes without the camera's motion, which replayed hitch pairs
+// preferred to any scaling of the fit.
+constexpr float kFitScaleMin = 0.75F, kFitScaleMax = 4.0F / 3.0F;
 
 struct Params {
     UINT extent[2], color_slice, guide_slice;
@@ -546,6 +555,7 @@ struct D3D12NativeDlssG::Impl {
     struct CameraMotion {
         std::array<float, 7> rigid{};
         std::uint64_t stream{}, epoch{}, serial{};
+        float dt_ms{};  // its pair's frame time, for the scaling
         CameraFit report{};
     };
     std::array<std::optional<CameraMotion>, 2> fitted{};
@@ -560,10 +570,13 @@ struct D3D12NativeDlssG::Impl {
         std::uint64_t value{};
         UINT eyes{};
         std::array<std::uint64_t, 2> stream{}, epoch{}, serial{};
+        std::array<float, 2> dt_ms{};
     };
     std::array<FitReadback, kSlots> fits;
     UINT fit_slot{kSlots};
     bool camera_motion{};
+    // Test only (XRFG_TEST_NATIVE_FIT_SCALE=0): a fit used unscaled.
+    bool fit_time_scale{true};
     ComPtr<ID3D12PipelineState> fit;
     std::uint64_t fits_used{}, fits_rejected{};
     D3D12_RESOURCE_DESC source{};
@@ -627,6 +640,7 @@ struct D3D12NativeDlssG::Impl {
                         motion.stream = readback.stream[eye];
                         motion.epoch = readback.epoch[eye];
                         motion.serial = readback.serial[eye];
+                        motion.dt_ms = readback.dt_ms[eye];
                         motion.report = {angle * 57.29578F, {f[3], f[4], f[5]}, f[8], UINT(f[6]), UINT(f[7])};
                         fitted[eye] = motion;
                         ++fits_used;
@@ -640,14 +654,38 @@ struct D3D12NativeDlssG::Impl {
         } catch (...) {}
     }
     // The fit for a pair whose A is the frame given, if one is recent enough:
-    // the pair before, or at most kFitMaxBehind pairs back.
-    std::optional<std::array<float, 7>> fitted_motion(UINT eye, const DlssMotionVectorFrame &ga) const noexcept {
+    // the pair before, or at most kFitMaxBehind pairs back, scaled from its
+    // pair's frame time to this pair's (gb's) and dropped when the two are
+    // too far apart for a scaling to mean anything.
+    std::optional<std::array<float, 7>> fitted_motion(UINT eye, const DlssMotionVectorFrame &ga,
+                                                      const DlssMotionVectorFrame &gb) const noexcept {
         if (eye >= fitted.size() || !fitted[eye]) return std::nullopt;
         const auto &m = *fitted[eye];
         if (m.stream != ga.stream || m.epoch != ga.epoch) return std::nullopt;
         const auto behind = std::int64_t(ga.serial) - std::int64_t(m.serial);
         if (behind > kFitMaxBehind || behind < -kFitMaxBehind) return std::nullopt;
-        return m.rigid;
+        if (!fit_time_scale || !(m.dt_ms > 0.0F) || !(gb.frame_time_delta_ms > 0.0F)) return m.rigid;
+        const float ratio = gb.frame_time_delta_ms / m.dt_ms;
+        const bool dropped = ratio < kFitScaleMin || ratio > kFitScaleMax;
+        if (decision_log && std::abs(ratio - 1.0F) > 0.1F) {
+            std::fprintf(decision_log, "%llu fit eye=%u serial=%llu frame_time_ratio=%.3f %s\n",
+                         GetTickCount64(), eye, m.serial, ratio, dropped ? "dropped" : "scaled");
+        }
+        if (dropped) return std::nullopt;
+        if (std::abs(ratio - 1.0F) < 0.01F) return m.rigid;
+        // The rotation's angle and the translation, both by the ratio.
+        std::array<float, 7> r = m.rigid;
+        const float s = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+        const float angle = 2.0F * std::atan2(s, r[3]) * ratio;
+        const float f = s > 1e-6F ? std::sin(angle / 2) / s : ratio;
+        r[0] *= f;
+        r[1] *= f;
+        r[2] *= f;
+        r[3] = std::cos(angle / 2);
+        r[4] *= ratio;
+        r[5] *= ratio;
+        r[6] *= ratio;
+        return r;
     }
     void poll_decisions() noexcept {
         try {
@@ -1165,6 +1203,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         // One NGX evaluation has one clip space, so the camera's motion needs
         // a feature per eye.
         p->camera_motion = environment(L"XRFG_NATIVE_DLSSG_CAMERA", camera ? 1U : 0U) != 0;
+        p->fit_time_scale = environment(L"XRFG_TEST_NATIVE_FIT_SCALE", 1U) != 0;
         p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE") && !p->camera_motion;
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         p->scale = std::clamp(environment(L"XRFG_NATIVE_DLSSG_SCALE", scale), kMinScale, 100U);
@@ -1594,7 +1633,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 if (i < p.test_rigid.size() && p.test_rigid[i]) {
                     rigid = *p.test_rigid[i];
                 } else if (p.camera_motion && !shared) {
-                    rigid = p.fitted_motion(i, ga);
+                    rigid = p.fitted_motion(i, ga, gb);
                 }
                 if (rigid) {
                     std::copy(rigid->begin(), rigid->begin() + 4, params.camera_rotation);
@@ -1653,6 +1692,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                     readback.stream[i] = gb.stream;
                     readback.epoch[i] = gb.epoch;
                     readback.serial[i] = gb.serial;
+                    readback.dt_ms[i] = gb.frame_time_delta_ms;
                     readback.eyes = std::max(readback.eyes, i + 1);
                     p.fit_slot = slot;
                 }
