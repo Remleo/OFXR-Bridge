@@ -1068,6 +1068,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DEXPECT_PRESENTER=ON"
                 "-DREQUIRE_SCENARIO_PASS=ON"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
+        # 3X inline on a runtime that paces its waits: the second synthetic
+        # goes down right after the first (the extra cycle takes the held
+        # wait) and the real frame a period later, so the two synthetics
+        # share a scanout window. The bunched-pair detector has to read that
+        # from the pair's shorter gap and promote the presenter; measured from
+        # the second synthetic alone it saw a well-spaced pair, and Stellar
+        # Blade at 3X on the OpenXR Simulator stayed inline (release 33).
+        # The inline-promise scenario's own assertions are a 2X inline
+        # schedule's, so only the promotion and the hand-over order are held.
+        add_test(
+            NAME xrfg_layer_triple_frame_gen_paced_inline
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DTRIPLE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_triple_frame_gen.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/triple-frame-gen-paced-inline"
+                "-DMODE=inline-promise"
+                "-DEXPECT_PRESENTER=ON"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_triple_frame_gen.cmake")
         # The presenter scenarios hold under 3X as they stand: the call chain
         # reads the multiplier from the same ini and expects the virtual
         # period to follow it.
@@ -1097,6 +1116,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(
             xrfg_layer_triple_frame_gen_inline
             xrfg_layer_triple_frame_gen_presenter
+            xrfg_layer_triple_frame_gen_paced_inline
             PROPERTIES TIMEOUT 60)
         # 3X on the presenter expects every application frame to generate,
         # and with single-swapchain rings a pair reuses both synthetic
@@ -1110,6 +1130,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # have failed the same way on the runner, only less often.
         set_tests_properties(
             xrfg_layer_triple_frame_gen_presenter
+            xrfg_layer_triple_frame_gen_paced_inline
             xrfg_layer_triple_steamvr-presenter
             xrfg_layer_triple_steamvr-destroy-space
             xrfg_layer_triple_flight-simulator

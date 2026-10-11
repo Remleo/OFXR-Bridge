@@ -15836,6 +15836,7 @@ XrResult layer_end_frame_impl(
     // 3X: the second synthetic takes a cycle of its own first, and the
     // runtime's held wait with it where there is one.
     bool extra_cycle_completed = true;
+    auto extra_cycle_ended = first_end_started + first_end_elapsed;
     if (extra_ready) {
         run_private_releases(state.get(), extra_generated.pending_releases);
         extra_cycle_completed = submit_current_cycle(
@@ -15845,8 +15846,8 @@ XrResult layer_end_frame_impl(
                 ? std::optional<XrFrameState>(state->last_inline_frame_state)
                 : std::nullopt,
             true, std::nullopt, extra_generated.repeats_current).completed;
+        extra_cycle_ended = std::chrono::steady_clock::now();
     }
-    const auto current_cycle_started = std::chrono::steady_clock::now();
     run_private_releases(state.get(), current_generated.pending_releases);
     const InternalCycleResult current_cycle = submit_current_cycle(
         state,
@@ -15862,12 +15863,23 @@ XrResult layer_end_frame_impl(
         state->runtime_frame_waited_unbegun = false;
         state->application_begin_needs_wait = true;
     }
-    // How far apart the runtime actually received the two frames of this
-    // pair: from the synthetic's hand-over completing to the real frame's.
-    // With a second synthetic, from that one's hand-over.
-    const auto inline_pair_gap = std::chrono::steady_clock::now() -
-        (extra_ready ? current_cycle_started
-                     : first_end_started + first_end_elapsed);
+    // How far apart the runtime actually received the frames of this pair:
+    // from the synthetic's hand-over completing to the real frame's. With a
+    // second synthetic, the shorter of its two gaps - first synthetic to
+    // second, second to the real frame - because any two of the three landing
+    // in one scanout window loses a frame, and on a runtime whose wait does
+    // not pace it is the two synthetics that bunch. Measured from the second
+    // synthetic alone, as this first was, Stellar Blade at 3X on the OpenXR
+    // Simulator read as well spaced (second synthetic to real frame 11 ms at
+    // 90 Hz) while the first synthetic had gone over 0 ms before the second,
+    // and the session stayed inline for its whole 91 s with the compositor
+    // seeing two frames of every three.
+    const auto current_cycle_ended = std::chrono::steady_clock::now();
+    const auto first_end_ended = first_end_started + first_end_elapsed;
+    const auto inline_pair_gap = extra_ready
+        ? std::min(extra_cycle_ended - first_end_ended,
+                   current_cycle_ended - extra_cycle_ended)
+        : current_cycle_ended - first_end_ended;
     if (!current_cycle.completed || !extra_cycle_completed) {
         // The synthetic submission has already completed. A transient runtime
         // failure in the optional second cycle is recovered by the established

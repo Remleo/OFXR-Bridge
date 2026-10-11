@@ -1593,6 +1593,9 @@ Generation, 100%, camera off, 2X, hybrid), Meta XR Simulator at 90 Hz:
 | Clair Obscur: Expedition 33 | not reached: hung on the engine splash for 110 s and exited (UEVR's known incompatibility); the earlier 45 + 45 was its title scene | | |
 | Atomic Heart, on OFXR's hybrid since native cannot start there | the opening flight over the sea, first person, the camera turned by the stick (New Game, Peaceful Atom, a Continue on the loading screen; its shaders installing meanwhile) | 44.7 + 44.8, no repeats | 0 / 5 / 2 in 94 s |
 | RoboCop: Rogue City | first the opening in-engine cinematic (the news studio) after Play, New Main Campaign, Normal, which the game caps at 30 frames a second with a 52 to 63 ms frame every second or so; then, nine minutes in, play on the street, walking and turning for 100 s | cinematic 33.5 + 33.4 (67.6 shown, the game under half the refresh); play 43.9 + 44.0, no repeats | cinematic 0 / 96 / 0 in 103 s, each skip after one of those doubled frames with the next frame normal, so the rule reads them as the stalls they are; play 0 / 17 / 0 in 100 s |
+| Stellar Blade Demo, the automatic multiplier (`frames_auto=1`) | the same street, orbit and stalls, the game at 33 ms frames | began at 2X on the presenter (the bunched-pair promotion 6.4 s in), chose 3X at 17.5 s; at the end 25.4 real + 50.6 generated + 14.1 repeats | 14 / 0 / 2: the guided skips are the storm's 41 to 50 ms steps against 17 to 29 ms medians, all shown as B |
+| Stellar Blade Demo, 3X asked at creation (`triple_frame_gen=1`) | the same, the game at 33 ms frames | inline for the whole 91 s: 30 real and 30 pairs (60 synthetics) a second handed over, but see below - two of every three bunched | 1 / 1 / 1; the 50 ms pairs are 1.5 times a 33 ms median, under the cut, and generated cleanly |
+| Stellar Blade Demo, 3X asked at creation, on the fixed layer (`hitch_r32_3xfix2`) | the same | the presenter 7.0 s in; 30 real + 60 generated, no repeats, through the 30 s before the storm | 12 / 0 / 1: the storm's guided skips, every one shown as B; the capture itself ran out of disk (E: filled during this run, which stretched the session to 176 s of 30 + 60 with no repeats outside the storm) |
 
 No quarantine and no error in any of them; the prepare reason stayed 0
 throughout play. The arrival rule's remaining skips in Hellblade II's
@@ -1624,6 +1627,47 @@ all three repeat frames). For a close third-person character under a
 turning camera, then, native generation is the method; the hybrid's
 double on ordinary pairs is the next thing to look at in OFXR's own path,
 and extrapolation is for latency, not for this.
+
+3X and the automatic multiplier on the same play. The recipe was then run
+with the tray asking 3X (`triple_frame_gen=1`, capture `hitch_r32_3x`) and
+with the automatic multiplier (`frames_auto=1`, capture `hitch_r32_auto`),
+the game holding 33 ms frames on both. The automatic session began at 2X
+on the presenter (the bunched-pair promotion 6.4 s in, after thirty 5 ms
+gaps), chose 3X at 17.5 s and ran 30 real and 60 generated frames a second
+with no repeats until the stall storm, where its 14 guided skips were the
+storm's 41 to 50 ms steps against 17 to 29 ms medians, every one shown as
+its real frame; no quarantine. 3X asked at creation found a defect. That
+session stayed inline for its whole 91 s, 30 real frames and 30 pairs (60
+synthetics) a second handed over, and the flight log's hand-overs show
+what the compositor got: inside each application frame the second
+synthetic went to the runtime 0 ms after the first (the extra cycle takes
+the wait the runtime already holds) and the real frame 11 ms after that,
+then 22 ms to the next frame. The bunched-pair detector
+(`inline_pair_lands_in_one_scanout`) measured only the second of those
+gaps, read a well-spaced pair and never fired, while two of every three
+frames landed in one scanout window. It now takes the shorter of a 3X
+pair's two gaps (`scratchpad/pair_gaps.py` splits them from a flight log;
+`handover_gaps.py` histograms every gap). The fake runtime reproduces the
+shape exactly - 0.4 to 0.5 ms from the first synthetic to the second, 14
+ms to the real frame - so `xrfg_layer_triple_frame_gen_paced_inline` runs
+the inline-promise scenario (paced waits) with the 3X ini and holds the
+promotion and the presenter's synthetic, synthetic, real order. Live on
+the fixed layer the same recipe promoted the presenter 10.1 s in (a 3.3 ms
+gap against the 11.1 ms period, thirty in a row) and a
+relaunch on it (capture `hitch_r32_3xfix2`) promoted 7.0 s in and ran
+30 real and 60 generated frames a second with no repeats through the 30 s
+before the storm: the same 30 and 60 the inline session handed over, now
+each in a period of its own. The first
+verification run also showed what a measurement has to rule out: UEVR
+failed to resolve its `FViewportInfo::GetRenderTargetProvider` offset in
+that launch and re-scanned every 2.9 s with a 0.7 to 1.1 s emulation pass
+on the game thread, so the game read 20 frames a second with the presenter
+repeating 60 to 90 frames in each stall (`app_intervals.py` lists the
+gaps, `rate_bins.py` the rates per 10 s); a relaunch had none of it. The
+capture holds the first synthetic of a 3X pair (nearer the previous frame
+by a tenth of the error), and where she slides behind the phone booth both
+the 3X and the automatic run show her translucent along the booth's edge
+in the generated frame, an occlusion edge that is not 3X's.
 
 The whole-frame replay numbers could not see her (the background is most
 of the pixels), so the harness now scores a window as well:

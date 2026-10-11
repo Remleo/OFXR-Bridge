@@ -239,7 +239,12 @@ frame, 2X comes back and 3X is not tried again while the scene holds. On
 Meta's runtime and its simulator a game whose frame loop runs on one thread
 now takes the presenter from its first generating frame, as on Virtual
 Desktop, so its frames are paced to the shape rather than rounded up to the
-slot after the synthetic's.
+slot after the synthetic's. A 3X session on a runtime that does not pace its
+waits (the OpenXR Simulator) hands its two synthetics over together, so the
+bunched-frame check that takes the presenter now reads a 3X pair by the
+shorter of its two gaps; before release 33 it read the gap after the second
+synthetic, saw a well-spaced pair, and Stellar Blade at 3X stayed inline with
+the compositor showing two frames of every three.
 
 | Where | Setting |
 |---|---|
