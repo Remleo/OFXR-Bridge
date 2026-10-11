@@ -1556,7 +1556,13 @@ every third or fourth frame rounded up to a slot. At scale 1.9 (log pid
 xrEndFrame costs 6.7 ms a submission (internal_end_frame) and its wait
 5 ms, so the presenter's two submissions a pair take 23.5 ms, longer than
 the pair, and 3X could not have helped; the slack rule read that
-correctly. Since the forwarded
+correctly. The inline check itself was then run live with the session
+held inline (`XRFG_TEST_INLINE_ONLY=1`, a test-only switch that keeps a
+session this rule would promote on the inline path; log pid 66048, scale
+1.9): 3X at 12.7 s by the frame's-own-time rule (interval 3.09 periods,
+0.79 of slack, the frame 2.30), 2X back at 17.0 s with c=4 once the 3X
+interval had run a slot over, and 2X held with the latch through the 44 s
+watched, the interval back at 3.00 periods. Since the forwarded
 wait can overlap a render thread's work in a pipelined game, room to spare
 inline also needs
 the xrEndFrame thread's CPU share of its wall time (`GetThreadTimes` a

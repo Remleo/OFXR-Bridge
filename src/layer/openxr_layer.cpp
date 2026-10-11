@@ -13449,7 +13449,14 @@ struct InternalCycleResult {
 // presenter a pass-through stopped, c the graphics binding.
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
-    if (!(state->dispatch->virtual_desktop_runtime || state->dispatch->meta_runtime) ||
+    // Test only: XRFG_TEST_INLINE_ONLY=1 keeps a session this rule would
+    // promote inline, to measure the inline path live on these runtimes.
+    static const bool inline_only = [] {
+        wchar_t value[8]{};
+        return GetEnvironmentVariableW(L"XRFG_TEST_INLINE_ONLY", value, 8) > 0 && value[0] == L'1';
+    }();
+    if (inline_only ||
+        !(state->dispatch->virtual_desktop_runtime || state->dispatch->meta_runtime) ||
         state->steamvr_presenter_start_requested ||
         (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
         return false;
