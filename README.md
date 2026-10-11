@@ -1249,10 +1249,14 @@ Generation's resolution and camera motion, OFXR's flow and its scale, both
 ways, its mode (interpolate, the hybrid, extrapolate), the pipeline, and
 pause. Push the stick once to bring up the cursor, up and down to move it,
 left and right to step the highlighted setting to the next choice, which is
-shown beside the current one, and pull the trigger to apply it. A staged
-choice is dropped if the cursor moves, the panel goes, or six seconds pass,
-and the trigger does nothing with nothing staged, so a glance at the panel
-never changes anything. Pause takes effect at once; the method, resolution,
+shown beside the current one, and hold the trigger for half a second to
+apply it. A staged choice is dropped if the cursor moves, the panel goes,
+or six seconds pass, and the trigger does nothing with nothing staged, so a
+glance at the panel never changes anything, and a pull of the trigger in
+play with the controller turned over does not either. When a change is
+applied the tray's balloon names it ("Mode: hybrid -> extrapolate") and
+`tray-lifecycle.log` keeps a `headset-change` line, so a setting that
+changed without your meaning it is easy to see and undo. Pause takes effect at once; the method, resolution,
 flow, flow scale, both ways, the hybrid and 2X or 3X take effect in the
 running game within a moment; camera motion, the pipeline and extrapolation
 say "from the next game start". The tray reads every change back within

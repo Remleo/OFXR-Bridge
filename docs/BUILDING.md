@@ -986,9 +986,9 @@ status panel 0.29 s after the controller turned over and hid it 0.51 s after
 it came upright, every cycle: the gesture's input path, end to end. With the
 flip, `XRFG_TEST_RUNTIME_PANEL_ROW=<row>` works the panel's controls once, a
 second into the first flip: the right thumbstick pushed down row + 1 times
-(the first shows the cursor), then right once, then the trigger pulled, each
-held 150 ms with 150 ms between, so the setting on that row is stepped to its
-next choice and applied (`test_runtime_device` a=5, the `status_panel` 6
+(the first shows the cursor), then right once, each held 150 ms with 150 ms
+between, then the trigger held 600 ms, so the setting on that row is stepped
+to its next choice and applied (`test_runtime_device` a=5, the `status_panel` 6
 record and the runtime ini say what happened). The
 simulator accepted the head moves but did not move its head for any of the
 input paths tried, though Meta XR Operator's `openxr_set_head_pose` moves it
@@ -2140,7 +2140,11 @@ per layer of the code, and only the last one touches the game.
   nor on single-frame native, the flow fixed without NVIDIA, the camera and
   the pipeline marked for the next start); the navigator steps on crossing
   0.6 of the stick, re-arms under 0.3, repeats after 500 ms every 300 ms,
-  and takes the trigger on its press; the cursor's first command only shows
+  takes a new direction without a release as a new press, and takes the
+  trigger once it has been held 400 ms, once per press (a pull in play with
+  the controller turned over must not change a setting; the tray names each
+  adopted change in its balloon and in a `headset-change` line of
+  tray-lifecycle.log); the cursor's first command only shows
   it, up and down wrap and drop a staged choice, left and right stage, the
   trigger applies a staged choice and a stage lives six seconds. The text
   carries the block when `controls_bound`, the row the cursor stands on in

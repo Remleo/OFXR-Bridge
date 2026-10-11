@@ -1974,9 +1974,10 @@ template <typename Call>
 // With the flip, XRFG_TEST_RUNTIME_PANEL_ROW=<row> works the panel's
 // controls once, a second into the first flip: the right thumbstick pushed
 // down row + 1 times (the first shows the cursor, each other moves it a
-// row), then right once, then the trigger pulled, each held 150 ms with 150
-// ms between, so the panel's setting on that row is stepped to its next
-// choice and applied. The flip's half period must leave room for it.
+// row), then right once, each held 150 ms with 150 ms between, then the
+// trigger held for 600 ms (it applies at 400), so the panel's setting on
+// that row is stepped to its next choice and applied. The flip's half
+// period must leave room for it.
 struct TestRuntimeDevices {
     float sway{};  // radians
     double sway_period_ns{4.0e9};
@@ -2177,8 +2178,10 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
                 d.test_set_input_device_state_float != nullptr) {
                 const double in_flip = std::fmod(since, wanted.flip_period_ns) - 1.0e9;
                 const int step = in_flip < 0.0 ? -1 : static_cast<int>(in_flip / 0.3e9);
-                const bool pressed = in_flip >= 0.0 && std::fmod(in_flip, 0.3e9) < 0.15e9;
                 const int downs = wanted.panel_row + 1;
+                // The trigger's two steps are one 600 ms hold.
+                const bool trigger_step = step == downs + 1 || step == downs + 2;
+                const bool pressed = trigger_step || (in_flip >= 0.0 && std::fmod(in_flip, 0.3e9) < 0.15e9);
                 if (step != s.script_step || pressed != s.script_pressed) {
                     s.script_step = step;
                     s.script_pressed = pressed;
@@ -2188,7 +2191,7 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
                         stick.y = -1.0F;
                     } else if (pressed && step == downs) {
                         stick.x = 1.0F;
-                    } else if (pressed && step == downs + 1) {
+                    } else if (trigger_step) {
                         trigger = 1.0F;
                     }
                     const XrResult stick_result = d.test_set_input_device_state_vector2f(
@@ -2199,7 +2202,7 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
                         event(XR_FAILED(stick_result) ? stick_result : trigger_result, 5,
                             static_cast<std::uint64_t>(step), pressed ? 1 : 0);
                     }
-                    if (step > downs + 1) s.script_done = true;
+                    if (step > downs + 2) s.script_done = true;
                 }
             }
         }

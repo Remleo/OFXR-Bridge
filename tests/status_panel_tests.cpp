@@ -472,10 +472,21 @@ int main(int argc, char** argv) {
             require(navigator.feed({0.0f, 0.8f, false, true}, at(1010)) == PanelCommand::none, "not re-armed yet");
             require(navigator.feed({0.0f, 0.0f, false, true}, at(1020)) == PanelCommand::none, "released");
             require(navigator.feed({-0.9f, 0.1f, false, true}, at(1030)) == PanelCommand::left, "left");
-            require(navigator.feed({-0.9f, 0.1f, true, true}, at(1040)) == PanelCommand::confirm, "trigger pressed");
-            require(navigator.feed({-0.9f, 0.1f, true, true}, at(1050)) == PanelCommand::none, "trigger held");
-            require(navigator.feed({0.0f, 0.0f, false, false}, at(1060)) == PanelCommand::none, "inactive");
-            require(navigator.feed({0.0f, -0.9f, false, true}, at(1070)) == PanelCommand::down, "down after a reset");
+            require(navigator.feed({0.0f, 0.0f, false, true}, at(1035)) == PanelCommand::none, "stick released");
+            // The trigger applies once held 400 ms, once per press.
+            require(navigator.feed({0.0f, 0.0f, true, true}, at(1040)) == PanelCommand::none, "trigger pressed: not yet");
+            require(navigator.feed({0.0f, 0.0f, true, true}, at(1300)) == PanelCommand::none, "trigger held 260 ms: not yet");
+            require(navigator.feed({0.0f, 0.0f, true, true}, at(1450)) == PanelCommand::confirm, "trigger held 400 ms: applied");
+            require(navigator.feed({0.0f, 0.0f, true, true}, at(1900)) == PanelCommand::none, "held on: once");
+            require(navigator.feed({0.0f, 0.0f, false, true}, at(1910)) == PanelCommand::none, "trigger released");
+            require(navigator.feed({0.0f, 0.0f, true, true}, at(1920)) == PanelCommand::none, "pressed again: not yet");
+            require(navigator.feed({0.0f, 0.0f, false, false}, at(1930)) == PanelCommand::none, "inactive");
+            require(navigator.feed({0.0f, -0.9f, false, true}, at(1940)) == PanelCommand::down, "down after a reset");
+            // The thumb rolls from down to right without passing the centre:
+            // a new press, not a wait for the release.
+            require(navigator.feed({0.9f, -0.2f, false, true}, at(1950)) == PanelCommand::right, "rolled to the right");
+            require(navigator.feed({0.9f, -0.2f, false, true}, at(1960)) == PanelCommand::none, "held right, no repeat yet");
+            require(navigator.feed({0.9f, -0.2f, false, true}, at(2470)) == PanelCommand::right, "right repeats after the delay");
         }
         // The cursor: the first command only shows it; up and down wrap and
         // drop a staged choice; left and right stage; the trigger applies a
@@ -525,7 +536,7 @@ int main(int argc, char** argv) {
                     "highlighted row");
             cursor.staged = 1;
             text = status_panel_text(input, &cursor);
-            require(line_labelled(text, "Per frame").text == "2X > 3X, trigger to apply" &&
+            require(line_labelled(text, "Per frame").text == "2X > 3X, hold the trigger to apply" &&
                         line_labelled(text, "Per frame").tone == PanelTone::accent, "staged row");
             std::uint32_t plain_used = 0, edited_used = 0;
             const auto plain = rasterize_status_panel(kStatusPanelWidth, kStatusPanelHeight, input, false, false, &plain_used);

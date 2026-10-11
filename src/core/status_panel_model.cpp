@@ -350,8 +350,19 @@ PanelCommand PanelNavigator::feed(const PanelInputSample& sample, std::int64_t n
         return PanelCommand::none;
     }
     PanelCommand command = PanelCommand::none;
-    if (sample.confirm && !confirm_down_) command = PanelCommand::confirm;
-    confirm_down_ = sample.confirm;
+    // The trigger applies once it has been held kPanelConfirmHoldNs, once
+    // per press: a pull in play with the controller turned over - a reload,
+    // a throw - must not change a setting. A staged choice says so.
+    if (!sample.confirm) {
+        confirm_since_ = -1;
+        confirm_fired_ = false;
+    } else {
+        if (confirm_since_ < 0) confirm_since_ = now_ns;
+        if (!confirm_fired_ && now_ns - confirm_since_ >= kPanelConfirmHoldNs) {
+            confirm_fired_ = true;
+            command = PanelCommand::confirm;
+        }
+    }
     const float ax = std::abs(sample.x), ay = std::abs(sample.y);
     int direction_x = 0, direction_y = 0;
     if (ay >= ax && ay >= kPanelDeadzone) {
@@ -372,13 +383,23 @@ PanelCommand PanelNavigator::feed(const PanelInputSample& sample, std::int64_t n
             held_y_ = direction_y;
             held_since_ = last_repeat_ = now_ns;
             if (command == PanelCommand::none) command = step(direction_x, direction_y);
-        } else if (direction_x == held_x_ && direction_y == held_y_ &&
-                   now_ns - held_since_ >= kPanelRepeatDelayNs &&
-                   now_ns - last_repeat_ >= kPanelRepeatPeriodNs) {
-            last_repeat_ = now_ns;
+        } else if (direction_x == held_x_ && direction_y == held_y_) {
+            if (now_ns - held_since_ >= kPanelRepeatDelayNs &&
+                now_ns - last_repeat_ >= kPanelRepeatPeriodNs) {
+                last_repeat_ = now_ns;
+                if (command == PanelCommand::none) command = step(direction_x, direction_y);
+            }
+        } else {
+            // A new direction without a release is a new press: a thumb
+            // rolling from down to right to stage a choice does not pass
+            // through the centre, and the test driver's stick did the same
+            // once when two of its steps fell into one frame, so the row's
+            // choice was never staged.
+            held_x_ = direction_x;
+            held_y_ = direction_y;
+            held_since_ = last_repeat_ = now_ns;
             if (command == PanelCommand::none) command = step(direction_x, direction_y);
         }
-        // A new direction without a release waits for one.
     }
     return command;
 }
@@ -692,7 +713,7 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
                 choices > 0 ? row.choices[static_cast<std::size_t>(std::clamp(row.current, 0, choices - 1))]
                             : std::string("-");
             if (staged >= 0) {
-                line.text = current + " > " + row.choices[static_cast<std::size_t>(staged)] + ", trigger to apply";
+                line.text = current + " > " + row.choices[static_cast<std::size_t>(staged)] + ", hold the trigger to apply";
                 line.tone = PanelTone::accent;
             } else if (highlighted && row.available && choices > 1) {
                 line.text = "< " + current + " >";

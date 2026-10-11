@@ -261,6 +261,9 @@ inline constexpr std::int64_t kPanelRepeatDelayNs = 500'000'000;
 inline constexpr std::int64_t kPanelRepeatPeriodNs = 300'000'000;
 // A staged value not applied within this long is dropped.
 inline constexpr std::int64_t kPanelStageTimeoutNs = 6'000'000'000;
+// The trigger applies a staged choice once it has been held this long: a
+// pull in play with the controller turned over must not change a setting.
+inline constexpr std::int64_t kPanelConfirmHoldNs = 400'000'000;
 class PanelNavigator {
 public:
     [[nodiscard]] PanelCommand feed(const PanelInputSample& sample, std::int64_t now_ns) noexcept;
@@ -270,7 +273,8 @@ private:
     int held_y_{};
     std::int64_t held_since_{-1};
     std::int64_t last_repeat_{-1};
-    bool confirm_down_{};
+    std::int64_t confirm_since_{-1};
+    bool confirm_fired_{};
 };
 struct PanelCursor {
     int row{-1};     // the setting it stands on; -1 while it is not shown

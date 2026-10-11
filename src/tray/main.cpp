@@ -846,6 +846,48 @@ void stop_adopted_arms(AppState& state, std::wstring* errors) {
 // ini does not revert them. The pause event likewise reads back. Called
 // before the tray rewrites the ini, before its menu opens, and on a timer
 // while armed.
+// What a headset change changed, for the balloon and the lifecycle log:
+// the settings the panel edits, each as "name: from -> to".
+[[nodiscard]] std::wstring describe_settings_change(
+    const xrfg::standalone::LauncherSettings& a, const xrfg::standalone::LauncherSettings& b) {
+    using namespace xrfg::standalone;
+    std::wstring text;
+    const auto add = [&](const wchar_t* name, std::wstring from, std::wstring to) {
+        if (from == to) return;
+        if (!text.empty()) text += L"; ";
+        text += name; text += L": "; text += from; text += L" -> "; text += to;
+    };
+    const auto onoff = [](bool v) { return std::wstring(v ? L"on" : L"off"); };
+    const auto method = [](const LauncherSettings& s) {
+        return std::wstring(s.frame_generation == FrameGeneration::native_dlss ? L"DLSS Frame Generation" : L"OFXR");
+    };
+    const auto frames = [](const LauncherSettings& s) {
+        return std::wstring(s.frames_auto ? L"automatic" : s.triple_frame_gen ? L"3X" : L"2X");
+    };
+    const auto flow = [](const LauncherSettings& s) {
+        if (s.backend == FlowBackend::fidelity_fx) return std::wstring(L"FidelityFX");
+        return std::wstring(L"NVIDIA ") + (s.nvidia_preset == NvidiaPerformancePreset::slow ? L"slow"
+            : s.nvidia_preset == NvidiaPerformancePreset::fast ? L"fast" : L"medium");
+    };
+    const auto flow_scale = [](const LauncherSettings& s) {
+        return std::wstring(s.nvidia_input_scale == NvidiaInputScale::full ? L"100%"
+            : s.nvidia_input_scale == NvidiaInputScale::three_quarter ? L"75%" : L"50%");
+    };
+    const auto mode = [](const LauncherSettings& s) {
+        return std::wstring(s.extrapolate ? L"extrapolate" : s.dlss_flow_hybrid ? L"hybrid" : L"interpolate");
+    };
+    add(L"Method", method(a), method(b));
+    add(L"Per frame", frames(a), frames(b));
+    add(L"Resolution", std::to_wstring(a.native_scale) + L"%", std::to_wstring(b.native_scale) + L"%");
+    add(L"Camera", onoff(a.native_camera), onoff(b.native_camera));
+    add(L"Flow", flow(a), flow(b));
+    add(L"Flow scale", flow_scale(a), flow_scale(b));
+    add(L"Both ways", onoff(a.nvidia_bidirectional), onoff(b.nvidia_bidirectional));
+    add(L"Mode", mode(a), mode(b));
+    add(L"Buffering", a.deep_pipeline ? L"deep" : L"shallow", b.deep_pipeline ? L"deep" : L"shallow");
+    return text;
+}
+
 void adopt_runtime_changes(AppState& state, bool announce) {
     if (!state.armed) return;
     try {
@@ -864,13 +906,22 @@ void adopt_runtime_changes(AppState& state, bool announce) {
         const std::string content = text.str();
         if (content == state.runtime_ini_last) return;
         state.runtime_ini_last = content;
+        const auto before = state.settings;
         if (!xrfg::standalone::adopt_runtime_ini(state.settings, content)) return;
         save_settings(state);
         state.benchmark.settings_changed(state.settings);
         refresh_tray_icon(state);
+        // Named, so that a change made by accident - the controller turned
+        // over in play, a stick push and the trigger - is seen for what it
+        // is, in the balloon and in tray-lifecycle.log.
+        const std::wstring changed = describe_settings_change(before, state.settings);
+        if (!changed.empty()) {
+            log_lifecycle(state.local_directory, L"headset-change " + changed);
+        }
         if (announce) {
             show_balloon(state, L"OFXR options changed from the headset",
-                         L"The status panel's change is saved; the tray's menu shows it.");
+                         changed.empty() ? std::wstring(L"The status panel's change is saved; the tray's menu shows it.")
+                                         : changed + L". Saved; the tray's menu shows it.");
         }
     } catch (...) {
     }
