@@ -194,8 +194,9 @@ half the refresh rate, 2X again once it has a display period to spare at 3X
 (`[tray] frames_auto=1`, `[ofxr] frames_auto=1`; the panel's **Per frame**
 row offers it too). The choice is made from the game's frame interval and
 the time it waits in the layer, so it follows a game through a heavy scene
-and back, and it needs the live 3X switch (Prefer FPS over latency on; on
-DLSS Frame Generation an RTX 50).
+and back. It needs the live 3X switch (Prefer FPS over latency on; on
+DLSS Frame Generation an RTX 50) and the layer's presenter thread: a session
+that runs inline keeps the shape you chose, and the panel says so.
 
 | Where | Setting |
 |---|---|

@@ -1404,8 +1404,9 @@ four seconds, slack over 1.15 periods a frame at every poll goes back to
 SteamVR halves the rate, and each switch resets the measures. The first
 build judged the averages as they stood at the poll, and a start-up stall
 in Stellar Blade on the OpenXR Simulator (2.0 periods and a period of
-slack a poll earlier) sent it to 3X at 14 s and back at 18 s; sustained
-over the window, the same log moves nothing. Every poll writes `presenter_transition` 1700
+slack a poll earlier) sent it to 3X at 14 s and back at 18 s, and a console
+command's hiccup did the same at 243 s; replayed over the polls of that
+log, the sustained rule fires on neither. Every poll writes `presenter_transition` 1700
 (a repeats in a thousand shown, b slack in microseconds, c the shape in
 the high word and the interval in microseconds in the low), and a switch
 writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application
