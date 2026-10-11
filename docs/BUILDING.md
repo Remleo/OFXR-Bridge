@@ -1635,16 +1635,21 @@ head in eye 1 (0.33,0.43 to 0.44,0.58):
 | Method | Error over her head | Error where the scene moved |
 |---|---|---|
 | Native DLSS FG 100% / 67% | 4.78 / 4.86 | 7.68 / 7.35 |
-| OFXR hybrid (vectors + FidelityFX flow) | 5.59 | 7.46 |
+| OFXR hybrid (vectors, FidelityFX flow where they disagree) | 5.08 | |
+| OFXR on the game's vectors alone | 5.59 | 7.46 |
 | OFXR NVIDIA medium flow | 6.37 | 7.89 |
 | OFXR FidelityFX flow, half or full | 7.12 | 8.45 |
 | Blend of the two frames | 10.82 | 11.93 |
 | The real frame repeated | 12.77 | 13.69 |
 
-So the crops and the window agree: on her, native is a sixth better than
-the hybrid and a third better than the flows, while the whole-frame
-moving error had the hybrid ahead of native. The window is the number to
-watch for anything done to the hybrid's choice between its branches.
+So the crops and the window agree: on her, native is six percent better
+than the hybrid, a sixth better than the vectors alone and a third better
+than the flows, while the whole-frame moving error had the vectors ahead
+of native; and the hybrid's flow fallback earns its keep, taking the
+vectors' 5.59 to 5.08 on her. (The default replay list's "OFXR+DLSS
+vectors" is the vectors alone; the hybrid is `hybrid/medium/half` in
+`XRFG_TEST_REPLAY_FLOWS`.) The window is the number to watch for anything
+done to the hybrid's choice between its branches.
 
 #### The deeper pipeline: its phase, and an automatic depth
 

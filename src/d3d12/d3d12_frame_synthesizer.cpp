@@ -365,6 +365,19 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
 // bits of synthesis_flags. Zero is reserved for "not set", which the shader
 // decodes as the old fixed midpoint, so a half that rounds to zero is nudged
 // rather than silently meaning something else.
+// Test only (XRFG_TEST_HYBRID_VARIANT=1..3): a variant of the hybrid's choice
+// between its vectors and flow branches, carried in SynthesisFlags bits 5-6
+// for the replay to A/B on recorded pairs. 0 is the shipped rule.
+[[nodiscard]] UINT hybrid_variant_flags() noexcept {
+    static const UINT bits = [] {
+        char buffer[8]{};
+        const DWORD n = GetEnvironmentVariableA("XRFG_TEST_HYBRID_VARIANT", buffer, sizeof(buffer));
+        const UINT v = (n > 0 && n < sizeof(buffer)) ? static_cast<UINT>(std::atoi(buffer)) : 0U;
+        return (v & 3U) << 5U;
+    }();
+    return bits;
+}
+
 [[nodiscard]] constexpr UINT packed_synthesis_fraction(float fraction) noexcept {
     const float clamped = fraction < 0.0F ? 0.0F : (fraction > 1.0F ? 1.0F : fraction);
     UINT packed = static_cast<UINT>(clamped * 65535.0F + 0.5F);
@@ -3171,7 +3184,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) | hybrid_variant_flags();
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;
@@ -3505,7 +3518,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(pack_pipeline.Get());
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) | hybrid_variant_flags() |
             pack_input_flags(view_format);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -3671,7 +3684,7 @@ struct D3D12FrameSynthesizer::Impl {
                 : nvidia_pack_pipeline.Get());
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) | hybrid_variant_flags() |
             pack_input_flags(view_format);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -4320,7 +4333,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetPipelineState(pack_pipeline.Get());
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) |
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) | hybrid_variant_flags() |
             pack_input_flags(view_format);
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
@@ -4686,7 +4699,7 @@ struct D3D12FrameSynthesizer::Impl {
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         SynthesisParameters parameters{};
-        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction);
+        parameters.synthesis_flags = packed_synthesis_fraction(synthetic_fraction) | hybrid_variant_flags();
         parameters.width = static_cast<UINT>(image_description.Width);
         parameters.height = image_description.Height;
         parameters.array_size = image_description.DepthOrArraySize;

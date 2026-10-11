@@ -1455,10 +1455,17 @@ float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
     float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
     float vectors_disagreement = last_disagreement;
+    // Test variants of this choice (XRFG_TEST_HYBRID_VARIANT, bits 5-6): 1
+    // asks the flow less often, 2 makes it win less easily, 3 leans on the
+    // vectors unless the flow is clearly better.
+    uint variant = (SynthesisFlags >> 5u) & 3u;
+    float ask = variant == 1u ? 0.05 : 0.02;
+    float slope = variant == 2u ? 4.0 : 8.0;
+    float lean = variant == 3u ? 0.03 : 0.0;
     // Where the vectors explain both frames, the flow need not be asked.
-    [branch] if (vectors_disagreement < 0.02) return vectors;
+    [branch] if (vectors_disagreement < ask) return vectors;
     float4 flow = synthesize_midpoint(input, 1.0, false, false, false, false, false);
-    return lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
+    return lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement + lean) * slope));
 }
 
 // The NVIDIA variants read flow in signed S10.5 fixed point, and from a
