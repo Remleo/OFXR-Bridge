@@ -1256,7 +1256,8 @@ glance at the panel never changes anything, and a pull of the trigger in
 play with the controller turned over does not either. When a change is
 applied the tray's balloon names it ("Mode: hybrid -> extrapolate") and
 `tray-lifecycle.log` keeps a `headset-change` line, so a setting that
-changed without your meaning it is easy to see and undo. Pause takes effect at once; the method, resolution,
+changed without your meaning it is easy to see and undo. Pause takes effect
+at once; the method, resolution,
 flow, flow scale, both ways, the hybrid and 2X or 3X take effect in the
 running game within a moment; camera motion, the pipeline and extrapolation
 say "from the next game start". The tray reads every change back within
