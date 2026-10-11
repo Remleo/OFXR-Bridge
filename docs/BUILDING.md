@@ -1390,8 +1390,28 @@ game hitched anyway. The ratio is against a median, so a game that settles
 at a lower rate generates again after four pairs, and a pair that misses
 one display slot at 2X (1.5 times) is kept. `XRFG_NATIVE_DLSSG_HITCH_SKIP=0`
 turns it off; the decision log writes `hitch ... skipped` for each. The
-same wide capture with the rule in is the confirmation that no hitch pair
-shows a generated frame.
+same wide capture with the rule in confirmed it (`hitch_skip_user_wide`,
+the user's configuration, 117 suspensions over eight sequences): 53
+`hitch ... skipped` lines, all 42.8 to 50 ms against medians of 22 to 30;
+every captured hitch pair shows exactly the real frame (generated against
+current 0.00, against 14 to 16 between the real frames) and every other
+pair is generated as before, the generated frame halfway between its
+neighbours - a 37.1 ms pair at 1.4 times included, and the 16.7 ms pairs
+right after a hitch, solid.
+
+A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
+the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the
+dumps in `%LOCALAPPDATA%\CrashDumps`: `std::terminate` inside the
+simulator's SwiftletInputPlugin, reached through the layer's downstream
+call). The game's own OpenXR plugin creates an instance about twenty
+seconds before UEVR's; when the launcher's per-process runtime override is
+already in place by then it succeeds on the simulator and stays alive, and
+UEVR's second instance is one more than the simulator's plugin takes. When
+the engine's attempt comes first it fails fast (-2, no runtime) and the
+session is fine, which is how every other launch today went. Launch UEVR
+games with `-nohmd` (`-GameArgs '-dx12 -nohmd'`): the engine opens no
+instance, UEVR's is the only one, and native DLSS FG on that path ran 44.9
++ 44.9 a second on the presenter with no quarantine.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
