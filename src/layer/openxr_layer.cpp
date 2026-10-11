@@ -13893,8 +13893,12 @@ void follow_synthetic_pose(SessionState& state) noexcept {
 // GPU is probed from the presenter thread (D3D12QueueProbe, once a display
 // period): the share of probes that found it busy, times the game's frame
 // interval, is its GPU time a frame, and 2X comes back only when that is
-// under 1.85 periods as well. Without a probe (another binding, or a queue
-// that cannot be calibrated) the slack decides alone, after twenty seconds.
+// under 1.85 periods as well, over the window and at every poll of it.
+// Without a probe (another binding, or a queue that cannot be calibrated)
+// the slack decides alone, after twenty seconds. Live in the same Stellar
+// Blade the probe read the city 67% busy (22 ms a frame) and 3X held for
+// the whole orbit with no repeat; the pause menu read 53% (12 ms) and 2X
+// came back in six seconds.
 [[nodiscard]] std::uint32_t automatic_frame_multiplier(
     SessionState& state,
     std::chrono::steady_clock::time_point now) noexcept {
@@ -13921,7 +13925,7 @@ void follow_synthetic_pose(SessionState& state) noexcept {
         return current;
     }
     std::uint64_t shown = 0, repeated = 0, probes = 0, busy = 0;
-    bool slow_throughout = true, spare_throughout = true;
+    bool slow_throughout = true, spare_throughout = true, gpu_spare_throughout = true;
     for (const auto& poll : state.auto_window) {
         shown += poll.frames;
         repeated += poll.repeats;
@@ -13930,6 +13934,12 @@ void follow_synthetic_pose(SessionState& state) noexcept {
         slow_throughout = slow_throughout && poll.interval_ns > 2.15 * period &&
             poll.slack_ns >= 0.0 && poll.slack_ns < 0.25 * period;
         spare_throughout = spare_throughout && poll.slack_ns > 1.15 * period;
+        // The GPU's time a frame at this poll, from this poll's probes alone:
+        // a window that straddles a scene change must not average the
+        // light frames before it into the heavy ones after.
+        gpu_spare_throughout = gpu_spare_throughout && poll.probes >= 8 &&
+            static_cast<double>(poll.busy) / static_cast<double>(poll.probes) *
+                    std::max(poll.interval_ns, 0.0) < 1.85 * period;
     }
     const double repeat_share = shown ? static_cast<double>(repeated) / static_cast<double>(shown) : 0.0;
     // The GPU's busy share over the window, and the game's GPU time a frame
@@ -13959,7 +13969,8 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     }
     if (current == 3U && spare_throughout) {
         if (probe != nullptr) {
-            if (probed && gpu_frame_ns < 1.85 * period && dwell >= std::chrono::seconds(4)) {
+            if (probed && gpu_frame_ns < 1.85 * period && gpu_spare_throughout &&
+                dwell >= std::chrono::seconds(4)) {
                 return 2U;
             }
         } else if (dwell >= std::chrono::seconds(20)) {

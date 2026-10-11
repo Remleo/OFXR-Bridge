@@ -1425,7 +1425,17 @@ time a frame; 2X comes back only when that is under 1.85 periods as well as
 the slack over 1.15. D3D12 sessions only, since a bridged session's queue
 is the layer's own; without a probe the slack decides alone after twenty
 seconds at 3X. The 1700 record's a carries the busy share in a thousand in
-its high half (65535 when unknown). Every poll writes `presenter_transition` 1700
+its high half (65535 when unknown). The same orbit again with the probe
+(log pid 63936): loading into the city the interval rose through 2.5 to
+2.9 periods with the slack gone and the GPU share climbing, 3X came at 16
+s; one return at 20 s while the share's window still held the light frames
+before the city (36%), 3X again at 26 s from 97% busy and 24 ms a frame,
+and then 3X held for 116 s at 66-67% busy, 22.2 ms a frame, 30 real and 60
+generated frames a second with no repeat at all, where run 3 had flapped
+35 times; the pause menu read 53% busy, 11.7 ms a frame, and 2X came back
+within six seconds and held with 45 + 45 and no repeat. The GPU condition
+is now required at every poll of the window as well, which takes the one
+return at 20 s with it. Every poll writes `presenter_transition` 1700
 (a repeats in a thousand shown, b slack in microseconds, c the shape in
 the high word and the interval in microseconds in the low), and a switch
 writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application
