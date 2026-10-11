@@ -70,11 +70,17 @@ int main(int argc, char** argv) {
     // "auto-frames": frames_auto=1 on the SteamVR presenter; a game that
     // cannot keep half the refresh rate is given 3X, and one that then has a
     // period to spare at 3X is given 2X back.
-    const bool auto_test = mode == "auto-frames" || mode == "auto-frames-inline";
+    const bool auto_test = mode == "auto-frames" || mode == "auto-frames-inline" ||
+        mode == "auto-frames-inline-paced";
     // "auto-frames-inline": the same on a session that stays inline (the fake
     // Pimax runtime), where the interval alone sends it to 3X and the probe's
     // GPU time with the xrEndFrame thread's CPU share bring 2X back.
-    if (mode == "auto-frames-inline") g_runtime_name_override = "Pimax OpenXR";
+    if (mode == "auto-frames-inline" || mode == "auto-frames-inline-paced") g_runtime_name_override = "Pimax OpenXR";
+    // "auto-frames-inline-paced": the fake runtime's waits paced to the
+    // period grid, as a real runtime's are, so the inline cycle's extra wait
+    // and submission at 3X round the game's frame up by a slot: 3X, then 2X
+    // back (700 with c=4), and no third switch.
+    g_paced_wait_mode = mode == "auto-frames-inline-paced";
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
     const std::string loop_runtime = frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
@@ -83,6 +89,7 @@ int main(int argc, char** argv) {
     if (handoff_loop && (loop_runtime != "virtual-desktop" || start_paused)) return 1;
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
+    else if (loop_runtime == "meta") g_runtime_name_override = "Meta XR Simulator";
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
     else if (frame_loop_test) return 1;
     const std::string marker_mode =
@@ -406,13 +413,15 @@ int main(int argc, char** argv) {
             std::cout << "frame loop " << loop_runtime << (split_loop ? " split" : " single")
                       << (start_paused ? " paused" : "") << ": presenter at frame "
                       << presenter_at << std::endl;
-            const bool decided_by_shape = loop_runtime != "other";
+            // A split loop on Meta's runtimes goes by the bunched-pair
+            // measurement like any other runtime's.
+            const bool decided_by_shape = loop_runtime != "other" && !(loop_runtime == "meta" && split_loop);
             if (!decided_by_shape && start_paused) return 1; // not a scenario
-            if (loop_runtime == "virtual-desktop" && !split_loop)
+            if ((loop_runtime == "virtual-desktop" || loop_runtime == "meta") && !split_loop)
                 // Requested on the first generating frame, started by the next,
                 // seen by the application at the wait after that.
                 require(presenter_at >= 0 && presenter_at <= 6,
-                    "a single-threaded session takes the presenter at its first generating frames on Virtual Desktop");
+                    "a single-threaded session takes the presenter at its first generating frames on Virtual Desktop and Meta's runtimes");
             else if (decided_by_shape)
                 require(presenter_at < 0,
                     "stays inline on this runtime whatever the pairs measure");
@@ -573,12 +582,16 @@ int main(int argc, char** argv) {
                 for (std::size_t i = polls.size() > 4 ? polls.size() - 4 : 0; i < polls.size(); ++i)
                     std::cerr << "  " << polls[i] << std::endl;
             };
-            if (mode == "auto-frames-inline") {
+            if (mode == "auto-frames-inline" || mode == "auto-frames-inline-paced") {
                 // Inline the fake runtime's wait never blocks, so the game is
                 // never held and its slack is nil: the shape it is given is
-                // read from the layer's own records (700 with c=3), and only
-                // the way up can be seen. Fifteen seconds of slow frames: 3X
-                // once, and no second switch after it.
+                // read from the layer's own records (700 with c=3, or c=4 for
+                // an automatic 3X undone), and only the way up can be seen:
+                // 3X once, and no second switch after it. Paced, the waits
+                // land on the period grid and the inline cycle's extra wait
+                // and submission at 3X round the frame up by a slot: 3X, 2X
+                // back with c=4, and no third switch.
+                const bool paced = mode == "auto-frames-inline-paced";
                 const auto switches = [&] {
                     std::filesystem::path newest;
                     for (const auto& entry : std::filesystem::directory_iterator(root)) {
@@ -586,39 +599,59 @@ int main(int argc, char** argv) {
                         if (name.rfind("ofxr-bridge-flight-", 0) == 0 && (newest.empty() || entry.path() > newest))
                             newest = entry.path();
                     }
-                    std::vector<std::uint32_t> shapes;
+                    std::vector<std::pair<std::uint32_t, std::uint32_t>> shapes;
                     if (newest.empty()) return shapes;
                     std::ifstream in(newest, std::ios::binary);
                     for (std::string line; std::getline(in, line);) {
                         const auto at = line.find("op=presenter_transition result=700 dur_us=0 a=");
-                        if (at != std::string::npos && line.find(" c=3") != std::string::npos)
-                            shapes.push_back(static_cast<std::uint32_t>(line[at + 46] - '0'));
+                        if (at == std::string::npos) continue;
+                        const auto c = line.find(" c=", at);
+                        if (c != std::string::npos && (line[c + 3] == '3' || line[c + 3] == '4'))
+                            shapes.push_back({static_cast<std::uint32_t>(line[at + 46] - '0'),
+                                              static_cast<std::uint32_t>(line[c + 3] - '0')});
                     }
                     return shapes;
                 };
                 const auto started = std::chrono::steady_clock::now();
-                double at_3x = -1.0;
-                while (std::chrono::steady_clock::now() < started + std::chrono::seconds(20)) {
-                    Sleep(25);
+                const auto since = [&] {
+                    return std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                };
+                double at_3x = -1.0, at_2x = -1.0;
+                std::vector<std::pair<std::uint32_t, std::uint32_t>> seen;
+                auto last_read = started;
+                while (since() < 30.0) {
+                    Sleep(paced ? 21 : 25);
                     require(XR_SUCCEEDED(begin(session, nullptr)), "slow frames");
                     capture();
                     submit(current.predictedDisplayTime);
                     require(wait_for_queue_idle(), "slow frames");
                     require(XR_SUCCEEDED(wait(session, nullptr, &current)), "slow frames");
-                    const auto seen = switches();
-                    if (at_3x < 0.0 && !seen.empty() && seen.back() == 3U) {
-                        at_3x = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+                    // The log grows a megabyte in ten seconds: read it four
+                    // times a second, not every frame, or the reading itself
+                    // lengthens the frames and moves the 2X interval the
+                    // paced check holds its latch against.
+                    if (std::chrono::steady_clock::now() - last_read >= std::chrono::milliseconds(250)) {
+                        seen = switches();
+                        last_read = std::chrono::steady_clock::now();
                     }
-                    if (at_3x >= 0.0 && std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - started).count() > at_3x + 6.0) {
-                        break;
-                    }
+                    if (at_3x < 0.0 && !seen.empty() && seen.front().first == 3U) at_3x = since();
+                    if (at_2x < 0.0 && seen.size() >= 2 && seen[1].first == 2U) at_2x = since();
+                    const double settled = paced ? at_2x : at_3x;
+                    if (settled >= 0.0 && since() > settled + 6.0) break;
                 }
-                const auto seen = switches();
-                if (at_3x < 0.0 || seen.size() != 1) explain("inline");
+                seen = switches();
+                if (at_3x < 0.0 || seen.size() != (paced ? 2U : 1U)) explain("inline");
                 require(at_3x >= 0.0, "an inline game under half the refresh rate is given 3X");
-                require(seen.size() == 1, "an inline game held short stays at 3X");
-                std::cout << "auto-frames-inline: 3X after " << at_3x << " s, held" << std::endl;
+                if (paced) {
+                    require(at_2x >= 0.0 && seen[1].second == 4U,
+                        "an inline game whose 3X cost it a slot is given 2X back");
+                    require(seen.size() == 2, "and 3X is not tried again while the scene holds");
+                    std::cout << "auto-frames-inline-paced: 3X after " << at_3x << " s, 2X back after "
+                              << at_2x << " s, held" << std::endl;
+                } else {
+                    require(seen.size() == 1, "an inline game held short stays at 3X");
+                    std::cout << "auto-frames-inline: 3X after " << at_3x << " s, held" << std::endl;
+                }
                 result = 0;
                 throw FinishedEarly{};
             }

@@ -543,6 +543,10 @@ struct Dispatch {
     // Virtual Desktop's own runtime (VDXR). Its presenter is paced on the
     // steady_clock grid rather than the floor; see pace_presenter_submission.
     bool virtual_desktop_runtime{};
+    // Meta's runtime ("Oculus", Quest Link) or its simulator ("Meta XR
+    // Simulator"): a frame loop on one thread takes the presenter there as
+    // on Virtual Desktop; see frame_loop_takes_presenter.
+    bool meta_runtime{};
     // Virtual Desktop's runtime or Pimax Play's ("Pimax OpenXR"): the two
     // where a session's mode is fixed by the application's frame loop and by
     // nothing measured. A title that waits for its next frame inside the
@@ -1236,6 +1240,11 @@ struct SessionState {
     std::uint64_t auto_cpu_time_100ns{};
     std::chrono::steady_clock::time_point auto_cpu_at{};
     double auto_cpu_share{-1.0};
+    // Inline, the automatic choice's check on itself: the interval at 2X
+    // when it left for 3X, and the latch set when 3X cost the game a slot,
+    // held while the 2X interval stays near the one it was taken at.
+    double auto_interval_at_2x{-1.0};
+    bool auto_inline_3x_costs_slot{};
     // The application's xrEndFrame thread only: the run of pairs that waited
     // at admission observe_admission_wait counts, how many runs long it must
     // be, and the presenter frame it adds to the next once-per-pair hold.
@@ -5857,6 +5866,9 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->virtual_desktop_runtime =
                 std::string_view(dispatch->runtime_name).find(
                     "VirtualDesktopXR") != std::string_view::npos;
+            dispatch->meta_runtime =
+                std::string_view(dispatch->runtime_name).find("Oculus") != std::string_view::npos ||
+                std::string_view(dispatch->runtime_name).find("Meta XR Simulator") != std::string_view::npos;
             dispatch->inline_unless_pipelined =
                 dispatch->virtual_desktop_runtime ||
                 std::string_view(dispatch->runtime_name).find(
@@ -13402,6 +13414,19 @@ struct InternalCycleResult {
 // there depends on GPU headroom, which is not known at start-up; the thread
 // shape is, and it is the same every run.
 //
+// Meta's runtime and its simulator: the same rule, for the same cost seen
+// from the game's side. Deep Rock Galactic under UEVR (a loop on one
+// thread) on the Meta XR Simulator at 90 Hz stayed inline, and its 23 ms
+// frame took three display slots: the synthetic's slot holds the thread,
+// then the render, then the wait rounds up to the next slot - 30 a second
+// with two shown frames in three, where the presenter paces that render to
+// two slots. Each submission costs the thread there too (the simulator's
+// xrEndFrame took 1.8 ms at 2064x2208 a frame and 4.9 at 3192x3344), so a
+// third frame inline added a fourth slot. Measured on the simulator; Link's
+// runtime is named with it because the cost is the inline cycle's shape -
+// a wait and a submission on the game's thread for every synthetic - and
+// not the runtime's speed.
+//
 // Decided from the runtime's name and from which thread calls which
 // function, both fixed by the application's code and seen by its second
 // frame (split_frame_loop latches on the first wait that follows an end from
@@ -13424,7 +13449,7 @@ struct InternalCycleResult {
 // presenter a pass-through stopped, c the graphics binding.
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
-    if (!state->dispatch->virtual_desktop_runtime ||
+    if (!(state->dispatch->virtual_desktop_runtime || state->dispatch->meta_runtime) ||
         state->steamvr_presenter_start_requested ||
         (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
         return false;
@@ -13931,15 +13956,35 @@ void follow_synthetic_pose(SessionState& state) noexcept {
 //
 // Inline, without a presenter, the game's threads block in the runtime's
 // wait instead - its own, forwarded, and the layer's cycle's - and that
-// time is its slack (with_runtime_entry_for_wait). The forwarded wait may
+// time is its slack (with_runtime_entry_for_wait). But that wait hands out
+// whole display slots, so at 2X a frame a little over two periods takes
+// three slots and reads a period of slack while the screen shows two
+// frames in three: inline, short is the frame's own time - the interval
+// less the slack, or the GPU's or the xrEndFrame thread's time if longer -
+// over 1.9 periods, not the slack under a quarter. The forwarded wait may
 // overlap a render thread's work in a pipelined game, so inline the
 // xrEndFrame thread's share of its wall time on the CPU (GetThreadTimes a
 // poll) must be under 1.85 periods a frame as well, beside the probe's GPU
-// time. Without a probe an inline session never comes back by itself.
+// time, before 2X comes back. Without a probe an inline session never
+// comes back by itself.
+//
+// Inline a third frame costs the game's thread another runtime wait and
+// submission a frame, and where that rounds the frame up to one more slot
+// 3X gives nothing: Deep Rock Galactic at 2X was 33.4 ms a frame on the
+// Meta XR Simulator, two frames shown in three slots, and at 3X 44.5 ms,
+// three in four, with the game a quarter slower. So inline the choice
+// checks itself: the interval at 2X is kept when it leaves for 3X, and
+// when the interval at 3X has run over it by 0.6 of a period at every poll
+// of two seconds, 2X comes back (700 with c=4) and 3X is not tried again
+// while the 2X interval stays within half a period of the one it was taken
+// at. On Meta's runtimes a loop on one thread now takes the presenter
+// (frame_loop_takes_presenter), where the submissions are off the game's
+// thread and a third frame costs it nothing.
 [[nodiscard]] std::uint32_t automatic_frame_multiplier(
     SessionState& state,
     std::chrono::steady_clock::time_point now,
-    bool inline_session) noexcept {
+    bool inline_session,
+    std::uint64_t& reason) noexcept {
     const std::uint32_t current = state.frames_per_application_frame;
     const std::uint64_t frames = state.auto_presenter_frames.load(std::memory_order_relaxed);
     const std::uint64_t repeats = state.auto_presenter_repeats.load(std::memory_order_relaxed);
@@ -13968,6 +14013,7 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     }
     std::uint64_t shown = 0, repeated = 0, probes = 0, busy = 0;
     bool slow_throughout = true, spare_throughout = true, gpu_spare_throughout = true;
+    bool grown_throughout = true, moved_throughout = true;
     for (std::size_t i = 0; i < state.auto_window.size(); ++i) {
         const auto& poll = state.auto_window[i];
         shown += poll.frames;
@@ -13984,8 +14030,34 @@ void follow_synthetic_pose(SessionState& state) noexcept {
         const bool repeating = poll.frames >= 8 &&
             static_cast<double>(poll.repeats) / static_cast<double>(poll.frames) > 0.08;
         if (age < 8) {
+            // Inline the slack is not room. The runtime's wait hands out
+            // whole display slots, so a frame of 2.05 periods takes three
+            // of them and blocks for the rest of the third: Deep Rock
+            // Galactic under UEVR on the Meta simulator sat at 2X with an
+            // interval of 3.00 periods and 0.95 of slack, two shown frames
+            // in three slots, for three minutes. So inline the frame's own
+            // time says short - the interval less the slack, or the GPU's
+            // or the xrEndFrame thread's time if longer - over 1.9 periods,
+            // which is what 2.15 less 0.25 says with a presenter.
+            const double interval_ns = std::max(poll.interval_ns, 0.0);
+            const double work_ns = !inline_session ? -1.0 : std::max({
+                interval_ns - std::max(poll.slack_ns, 0.0),
+                poll.probes >= 8
+                    ? static_cast<double>(poll.busy) / static_cast<double>(poll.probes) * interval_ns
+                    : 0.0,
+                std::max(poll.cpu_share, 0.0) * interval_ns});
             slow_throughout = slow_throughout && (poll.interval_ns > 2.15 * period || repeating) &&
-                poll.slack_ns >= 0.0 && poll.slack_ns < 0.25 * period;
+                poll.slack_ns >= 0.0 &&
+                (inline_session ? work_ns > 1.9 * period : poll.slack_ns < 0.25 * period);
+            // Inline, against the 2X interval 3X was taken from: at 3X,
+            // grown by 0.6 of a period at every poll, 3X cost a slot; at
+            // 2X, moved by half a period either way at every poll, the
+            // scene that cost it has gone.
+            grown_throughout = grown_throughout && state.auto_interval_at_2x > 0.0 &&
+                poll.interval_ns > state.auto_interval_at_2x + 0.6 * period;
+            moved_throughout = moved_throughout && state.auto_interval_at_2x > 0.0 &&
+                (poll.interval_ns > state.auto_interval_at_2x + 0.5 * period ||
+                 poll.interval_ns < state.auto_interval_at_2x - 0.5 * period);
         }
         // Room to spare: the slack (the presenter's holds, or inline the
         // layer's wait) over 1.15 periods, and inline, where that wait may
@@ -14025,8 +14097,22 @@ void follow_synthetic_pose(SessionState& state) noexcept {
     if (state.auto_interval_ema_ns < 0.0) {
         return current;
     }
-    if (current == 2U && dwell >= std::chrono::seconds(3) && slow_throughout) {
+    if (inline_session && current == 2U && state.auto_inline_3x_costs_slot && moved_throughout) {
+        state.auto_inline_3x_costs_slot = false;
+    }
+    if (current == 2U && dwell >= std::chrono::seconds(3) && slow_throughout &&
+        !(inline_session && state.auto_inline_3x_costs_slot)) {
+        if (inline_session) {
+            state.auto_interval_at_2x = state.auto_interval_ema_ns;
+        }
         return 3U;
+    }
+    if (inline_session && current == 3U && dwell >= std::chrono::seconds(3) && grown_throughout) {
+        // 3X cost the game a slot a frame: 2X back, and not again while
+        // the game's 2X interval stays where it was.
+        state.auto_inline_3x_costs_slot = true;
+        reason = 4;
+        return 2U;
     }
     if (current == 3U && spare_throughout) {
         if (probe != nullptr) {
@@ -14057,13 +14143,13 @@ void apply_live_frame_multiplier(
                 ? static_cast<double>(slack)
                 : state->auto_slack_ema_ns * 0.9 + static_cast<double>(slack) * 0.1;
             // The game's frame interval, xrEndFrame to xrEndFrame; a stall
-            // counts as four periods at most, so one does not swing the
-            // average by itself.
+            // counts as six periods at most (a 3X frame rounded up inline
+            // reaches five), so one does not swing the average by itself.
             if (state->auto_last_end_frame != std::chrono::steady_clock::time_point{}) {
                 double interval = static_cast<double>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(now - state->auto_last_end_frame).count());
                 const double period = static_cast<double>(state->presenter_display_period);
-                if (period > 0.0) interval = std::min(interval, 4.0 * period);
+                if (period > 0.0) interval = std::min(interval, 6.0 * period);
                 state->auto_interval_ema_ns = state->auto_interval_ema_ns < 0.0
                     ? interval : state->auto_interval_ema_ns * 0.9 + interval * 0.1;
             }
@@ -14134,8 +14220,8 @@ void apply_live_frame_multiplier(
                     state->auto_cpu_at = now;
                 }
             }
-            target = automatic_frame_multiplier(*state, now, !use_continuous_presenter);
             reason = 3;
+            target = automatic_frame_multiplier(*state, now, !use_continuous_presenter, reason);
         }
         if (target == state->frames_per_application_frame) {
             return;
@@ -14171,7 +14257,8 @@ void apply_live_frame_multiplier(
         }
         clear_generation_continuity(state);
         // 700: a the frames per game frame now, b the deeper pipeline, c 2
-        // a change of the tray's 3X setting, 3 the automatic choice.
+        // a change of the tray's 3X setting, 3 the automatic choice, 4 the
+        // automatic choice undone inline because 3X cost the game a slot.
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_transition,
             700,

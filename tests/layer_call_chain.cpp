@@ -151,6 +151,9 @@ bool g_promise_mode = false;
 // was before the layer promised the real frame's time, so they run with
 // XRFG_TEST_INLINE_PROMISE=0; this one checks the promise.
 bool g_inline_promise_mode = false;
+// Every wait paced to the period grid and the display time stepped by a
+// period: a real runtime's pacing without the rest of inline-promise.
+bool g_paced_wait_mode = false;
 // Set while the application is inside xrEndFrame. The layer runs its inline
 // second wait/begin/end cycle from that call on this same thread, which is
 // exactly what a throttling SteamVR configuration slows down, so this tells
@@ -404,8 +407,10 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
         static const bool pose_lag = std::getenv("XRFG_TEST_POSE_LAG") != nullptr;
         return pose_lag ? (display_time / kFakeDisplayPeriod) % 1000 : 0;
     }
-    if (g_inline_promise_mode) {
+    if (g_inline_promise_mode || g_paced_wait_mode) {
         // Back and forth, so a long run keeps its field of view in bounds.
+        // (Paced, the display time steps by a period a wait, and the default
+        // camera below would run its field of view out of bounds in a frame.)
         const XrTime step = (display_time / kFakeDisplayPeriod) % 400;
         return (step < 200 ? step : 400 - step) * 100;
     }
@@ -716,7 +721,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     // inline-promise: paced a period apart, as a real runtime is. Unpaced,
     // each pair's two frames go down within one period, and the layer
     // promotes the presenter (inline_pair_lands_in_one_scanout).
-    if (g_inline_promise_mode) {
+    if (g_inline_promise_mode || g_paced_wait_mode) {
         static std::chrono::steady_clock::time_point next_wait{};
         const auto now = std::chrono::steady_clock::now();
         if (now < next_wait) {
@@ -744,7 +749,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     g_next_display_time += g_flight_simulator_mode
         ? kFakeDisplayPeriod * 3
         : g_promise_mode ? (throttled ? kFakeDisplayPeriod * 2 : kFakeDisplayPeriod)
-        : g_inline_promise_mode ? kFakeDisplayPeriod
+        : (g_inline_promise_mode || g_paced_wait_mode) ? kFakeDisplayPeriod
         : 100;
     {
         std::scoped_lock lock(g_frame_loop_mutex);

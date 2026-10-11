@@ -196,7 +196,15 @@ row offers it too). The choice is made from the game's frame interval, the
 time it waits in the layer and how busy its GPU is, so it follows a game
 through a heavy scene and back without flapping. It needs the live 3X switch (Prefer FPS over latency on; on
 DLSS Frame Generation an RTX 50) and a D3D12 game; a game on the D3D11 or
-Vulkan bridge keeps the shape you chose.
+Vulkan bridge keeps the shape you chose. A session the layer serves inline,
+without its presenter thread (Pimax, a split frame loop on Virtual Desktop),
+checks the choice on itself: there each extra frame costs the game's own
+thread a wait and a submission, and where that costs it a display slot a
+frame, 2X comes back and 3X is not tried again while the scene holds. On
+Meta's runtime and its simulator a game whose frame loop runs on one thread
+now takes the presenter from its first generating frame, as on Virtual
+Desktop, so its frames are paced to the shape rather than rounded up to the
+slot after the synthetic's.
 
 | Where | Setting |
 |---|---|

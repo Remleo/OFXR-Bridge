@@ -1456,8 +1456,34 @@ that it has room to spare, four seconds of light frames before 2X comes
 back. Inline sessions have no hold for the slack to show in: the game's
 threads block in the runtime's wait instead, its own forwarded one and the
 layer's cycle's, and `with_runtime_entry_for_wait` counts that time as the
-slack while no presenter runs. Since the forwarded wait can overlap a
-render thread's work in a pipelined game, room to spare inline also needs
+slack while no presenter runs. That wait hands out whole display slots,
+though, so inline the slack is not room. Deep Rock Galactic under UEVR on
+the Meta simulator at UEVR scale 1.9 (log pid 40076, an inline session)
+sat at 2X for three minutes with an interval of 3.00 periods and 0.95 of
+slack: a 23 ms frame rounded up to three slots, two shown frames in three,
+and the slack never under the quarter period the short rule asked for.
+Inline, short is now the frame's own time - the interval less the slack,
+or the GPU's or the xrEndFrame thread's time if longer - over 1.9
+periods, which is what 2.15 less 0.25 says with a presenter. Run again
+with that rule (log pid 7592) 3X came at 12 s and held, but the interval
+went from 33.4 to 44.5 ms: inline every runtime submission runs on the
+game's thread - the simulator's xrEndFrame took 4.9 ms a frame at
+3192x3344 (1.8 at 2064x2208) and the wait for the next slot follows it -
+so the third frame added a fourth slot, three shown frames in four at 22.5
+a second against two in three at 30. So inline the choice checks itself:
+the 2X interval is kept when it leaves for 3X, and when the 3X interval has
+run over it by 0.6 of a period at every poll of two seconds, 2X comes back
+(700 with c=4) and 3X is not tried again while the 2X interval stays within
+half a period of the one it was taken at. And on Meta's runtime and its
+simulator a frame loop on one thread now takes the presenter from its first
+generating frame, as on Virtual Desktop (`frame_loop_takes_presenter`): the
+presenter hands the submissions to its own thread while the game renders,
+which is the mode the rounding cannot reach, and where the automatic choice
+was measured. `xrfg_frame_loop_meta_single` and `xrfg_frame_loop_meta_split`
+cover the rule and `xrfg_layer_auto_frames_inline_paced` the check, on the
+fake runtime with its waits paced to the period grid. Since the forwarded
+wait can overlap a render thread's work in a pipelined game, room to spare
+inline also needs
 the xrEndFrame thread's CPU share of its wall time (`GetThreadTimes` a
 poll) under 1.85 periods a frame, beside the probe's GPU time; the probe
 runs on a thread of its own once a display period, uniform in time
@@ -1466,10 +1492,13 @@ and Vulkan bridges have no probe and keep the chosen shape (a presenter
 session on them comes back by slack alone after twenty seconds).
 `xrfg_layer_auto_frames_inline` runs the test on the fake Pimax runtime,
 which stays inline; its wait never blocks, so only the way up can be seen
-there: 3X after 4.2 s of slow frames, and no second switch. Every poll writes `presenter_transition` 1700
-(a repeats in a thousand shown, b slack in microseconds, c the shape in
-the high word and the interval in microseconds in the low), and a switch
-writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application
+there: 3X after 4.2 s of slow frames, and no second switch. Every poll
+writes `presenter_transition` 1700 (a the GPU's busy share in a thousand
+in the high half, 65535 when unknown, and the repeats in a thousand shown
+in the low; b the xrEndFrame thread's CPU share in a thousand in the high
+word and the slack in microseconds in the low; c the shape in the high
+word and the interval in microseconds in the low), and a switch writes
+700 with c=3. `xrfg_layer_auto_frames` paces the fake application
 with a sleep: 25 ms a frame against a 10 ms period went to 3X after 3.0
 s, and 2 ms a frame came back to 2X 4.2 s later.
 

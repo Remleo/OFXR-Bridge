@@ -825,11 +825,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # that had the presenter and then hands its loop to another thread
         # gets back a presenter a pass-through stopped; Pimax OpenXR stays
         # inline; another runtime still goes by the bunched-pair measurement.
+        # On Meta's runtime and its simulator a single-threaded session takes
+        # the presenter as on Virtual Desktop, and a split loop goes by the
+        # measurement.
         foreach(shape
                 "virtual-desktop;split" "virtual-desktop;split;paused"
                 "virtual-desktop;single" "virtual-desktop;single;paused"
                 "virtual-desktop;handoff"
-                "pimax;split" "pimax;single" "other;single")
+                "pimax;split" "pimax;single" "meta;split" "meta;single" "other;single")
             string(REPLACE ";" "_" shape_name "${shape}")
             add_test(NAME xrfg_frame_loop_${shape_name} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> frame-loop ${shape})
@@ -848,6 +851,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_layer_auto_frames_inline COMMAND xrfg_layer_manual_disarm_tests
             $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> auto-frames-inline)
         set_tests_properties(xrfg_layer_auto_frames_inline PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        # Inline with the waits paced to the period grid: 3X costs the game a
+        # slot a frame, so 2X comes back and 3X is not tried again.
+        add_test(NAME xrfg_layer_auto_frames_inline_paced COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> auto-frames-inline-paced)
+        set_tests_properties(xrfg_layer_auto_frames_inline_paced PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         # The flight recorder switched on, off and on again in a running
         # session: the session records from before the switch head the file.
         add_test(NAME xrfg_layer_live_recorder COMMAND xrfg_layer_manual_disarm_tests
