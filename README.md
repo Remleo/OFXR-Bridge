@@ -636,7 +636,12 @@ hybrid under a new key and ignores the old one.
   generated nothing, since it initialises NGX before the layer loads and
   its DLSS plugin's search path carries no `nvngx_dlssg.dll` (NGX answers
   `0xBAD00004`, feature not found, to the layer's later question), which
-  is the documented no-fallback case - the panel now says so.
+  is the documented no-fallback case - the panel now says so. Those
+  unattended numbers are title screens and menus; the same day's runs
+  that reach play (Deep Rock Galactic in a mission, RoboCop on the street,
+  Stellar Blade's recipe, the cinematics of Hellblade II and RoboCop) are
+  in the building notes under "In play, not in menus", with the tools
+  that get a UEVR title there.
 
   Unity games ask for OpenXR 1.1 first, which SteamVR refuses, and then make
   their instance at 1.0; FlatOut does the same. Not generating, and not
