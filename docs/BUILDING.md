@@ -1432,8 +1432,16 @@ second check, plus a normal pair skipped before each by the first). Now
 the layer's rule takes B's frame time wherever a guide carries it
 (`frame_time_known`), and without a guide takes the arrival gap and marks
 the pair after a late frame (`skip_next_pair`; 778 in the log against 777
-for a step from the game's own time). The confirmation is the same recipe
-on the hybrid and on the user's configuration again.
+for a step from the game's own time). The same recipe on that build
+confirmed it on both. OFXR's hybrid (`hitch_ofxr_shift`): 49 records of
+777 and 3 of 778; every hitch pair (50.0, 47.0 and 50.0 ms) shown as B, the
+pairs before each stall generated normally, and two pairs under the cut
+(38.2 ms at about 1.53 times, and 34.4) generated with her body solid and
+only a faint edge ghost of the car behind her, no double image. The user's
+configuration, native DLSS FG (`hitch_dlss_shift`): 50 of 777 and 5 of
+778; both 50 ms pairs shown as B, every other pair generated, the ones
+right before stalls included, so the extra held frame of the first build
+is gone.
 
 A note for the test rig, not the layer: Deep Rock Galactic under UEVR on
 the Meta XR Simulator died twice in xrCreateInstance (0xc0000409, the
