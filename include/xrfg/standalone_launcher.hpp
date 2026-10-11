@@ -66,6 +66,10 @@ struct LauncherSettings {
     // "3X Frame Gen": two synthetic frames per application frame. Off by
     // default.
     bool triple_frame_gen{};
+    // "Automatic 2X or 3X": the layer chooses live from what the game keeps
+    // up with (its `[ofxr] frames_auto`); triple_frame_gen is then the
+    // starting shape. Off by default.
+    bool frames_auto{};
     // Executables the layer declines to load in, ';'-separated; written to
     // the layer's ini as excluded_processes. Pimax Home by default (see
     // implicit_layer.hpp). No menu entry; edit tray.ini.

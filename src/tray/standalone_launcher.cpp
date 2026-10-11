@@ -228,6 +228,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "triple_frame_gen") {
                     settings.triple_frame_gen = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "frames_auto") {
+                    settings.frames_auto = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "excluded_processes") {
                     settings.excluded_processes = value;
                 } else if (key == "single_swapchain_rings") {
@@ -313,6 +316,8 @@ bool adopt_runtime_ini(LauncherSettings& settings, std::string_view text) {
                     settings.deep_pipeline = on;
                 } else if (key == "triple_frame_gen") {
                     settings.triple_frame_gen = on;
+                } else if (key == "frames_auto") {
+                    settings.frames_auto = on;
                 }
             }
         }
@@ -324,7 +329,8 @@ bool adopt_runtime_ini(LauncherSettings& settings, std::string_view text) {
         settings.nvidia_preset != before.nvidia_preset || settings.nvidia_input_scale != before.nvidia_input_scale ||
         settings.nvidia_bidirectional != before.nvidia_bidirectional ||
         settings.dlss_flow_hybrid != before.dlss_flow_hybrid || settings.extrapolate != before.extrapolate ||
-        settings.deep_pipeline != before.deep_pipeline || settings.triple_frame_gen != before.triple_frame_gen;
+        settings.deep_pipeline != before.deep_pipeline || settings.triple_frame_gen != before.triple_frame_gen ||
+        settings.frames_auto != before.frames_auto;
 }
 
 std::string serialize_settings(const LauncherSettings& settings) {
@@ -342,6 +348,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
+           "\r\nframes_auto=" + (settings.frames_auto ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +
@@ -585,6 +592,7 @@ std::string build_runtime_ini(
            (settings.nvidia_bidirectional ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
+           "\r\nframes_auto=" + (settings.frames_auto ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
            "\r\nsingle_swapchain_rings=" + (settings.single_swapchain_rings ? "1" : "0") +
            "\r\nvulkan_session_bridge=" + (settings.vulkan_session_bridge ? "1" : "0") +

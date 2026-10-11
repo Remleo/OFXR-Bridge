@@ -839,6 +839,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         add_test(NAME xrfg_layer_steamvr_live_switch COMMAND xrfg_layer_manual_disarm_tests
             $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> steamvr-switch)
         set_tests_properties(xrfg_layer_steamvr_live_switch PROPERTIES TIMEOUT 30)
+        # Automatic 2X or 3X: a game too slow for 2X is given 3X, and given 2X
+        # back once it has a period to spare.
+        add_test(NAME xrfg_layer_auto_frames COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> auto-frames)
+        set_tests_properties(xrfg_layer_auto_frames PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
         # The flight recorder switched on, off and on again in a running
         # session: the session records from before the switch head the file.
         add_test(NAME xrfg_layer_live_recorder COMMAND xrfg_layer_manual_disarm_tests

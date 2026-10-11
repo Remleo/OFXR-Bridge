@@ -188,7 +188,14 @@ Frame Generation (experimental)** before the game starts its OpenXR session.
 The choice applies to the next session. Select one of the optical-flow methods
 in the same list to go back to OFXR's own. While native generation is
 selected, the menu's status line and the tray tooltip name it. **3X** under
-*Frames shown per game frame* switches native generation to 3X.
+*Frames shown per game frame* switches native generation to 3X, and
+**Automatic** there lets the layer choose: 3X while the game falls short of
+half the refresh rate, 2X again once it has a display period to spare at 3X
+(`[tray] frames_auto=1`, `[ofxr] frames_auto=1`; the panel's **Per frame**
+row offers it too). The choice is made from the game's frame interval and
+the time it waits in the layer, so it follows a game through a heavy scene
+and back, and it needs the live 3X switch (Prefer FPS over latency on; on
+DLSS Frame Generation an RTX 50).
 
 | Where | Setting |
 |---|---|
@@ -1157,7 +1164,7 @@ the bridge is armed or paused and which method is in use.
 | Entry | What it holds |
 |---|---|
 | **Disarm bridge** / **Pause frame generation** | Arming, and the pause, with its key shown beside it. |
-| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (from the game's DLSS vectors where it has them, the chosen flow elsewhere; the cheapest), **interpolate with DLSS vectors + FidelityFX flow** (default, best quality; games without DLSS keep the chosen flow), or **extrapolate, SpaceWarp-style** (no added latency, less accurate; FidelityFX flow in every game, whatever engine is chosen above). Then **2X** or **3X**. |
+| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (from the game's DLSS vectors where it has them, the chosen flow elsewhere; the cheapest), **interpolate with DLSS vectors + FidelityFX flow** (default, best quality; games without DLSS keep the chosen flow), or **extrapolate, SpaceWarp-style** (no added latency, less accurate; FidelityFX flow in every game, whatever engine is chosen above). Then **2X**, **3X** or **Automatic**. |
 | **Quality and performance** | Optical-flow resolution, NVIDIA's both-ways check, DLSS Frame Generation resolution, and Prefer FPS over latency. |
 | **Benchmark this PC...** | See below. |
 | **FPS overlay**, **Diagnostics**, **Advanced** | Overlay position and the status panel (below); flight recorder and logs; Lower VRAM and the pause key. |
@@ -1211,7 +1218,7 @@ Then a line each:
 
 While the panel is up on a controller, that controller's thumbstick and
 trigger edit it. Below the status lines the panel lists the settings: how
-many frames a game frame makes (2X or 3X), the method, DLSS Frame
+many frames a game frame makes (2X, 3X or automatic), the method, DLSS Frame
 Generation's resolution and camera motion, OFXR's flow and its scale, both
 ways, its mode (interpolate, the hybrid, extrapolate), the pipeline, and
 pause. Push the stick once to bring up the cursor, up and down to move it,

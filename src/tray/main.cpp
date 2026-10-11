@@ -100,6 +100,9 @@ enum MenuCommand : UINT {
     // it changes anything.
     frames_2x = 168,
     frames_3x = 169,
+    // The layer's choice between the two, live, from what the game keeps up
+    // with.
+    frames_automatic = 176,
     show_benchmark = 170,
     // The status panel, in the FPS overlay menu: on a controller turned
     // upside down, always in the view, or off.
@@ -1241,7 +1244,8 @@ void show_context_menu(AppState& state) {
                          ? extrapolation : extrapolation + L" \u00B7 no added latency");
         append_separator(methods);
         append_note(methods, L"Frames shown per game frame");
-        append_entry(methods, frames_2x, L"2X: one generated frame per game frame", !triple, true, true,
+        append_entry(methods, frames_2x, L"2X: one generated frame per game frame",
+                     !triple && !settings.frames_auto, true, true,
                      method_note(method, {.triple = false}));
         // NVIDIA's frame generation makes two frames a pair only where NGX
         // offers multi-frame generation (RTX 50); elsewhere the layer stays at
@@ -1249,10 +1253,15 @@ void show_context_menu(AppState& state) {
         // Without a benchmark of this PC nothing else says so.
         const std::wstring triple_note = method_note(method, {.triple = true});
         append_entry(methods, frames_3x, L"3X: two generated frames per game frame (switches live)",
-                     triple, true, true,
+                     triple && !settings.frames_auto, true, true,
                      native && triple_note.empty()
                          ? std::wstring(L"DLSS Frame Generation: RTX 50 series only, 2X on others")
                          : triple_note);
+        append_entry(methods, frames_automatic,
+                     L"Automatic: 3X while the game falls short of half the refresh rate",
+                     settings.frames_auto, true, true,
+                     native ? std::wstring(L"DLSS Frame Generation: RTX 50 series only")
+                            : std::wstring());
         append_submenu(menu, methods, L"Frame generation method");
     }
 
@@ -1740,8 +1749,27 @@ void handle_command(AppState& state, UINT command) {
     }
     case frames_2x:
     case frames_3x:
+        if (state.settings.frames_auto) {
+            state.settings.frames_auto = false;
+            update_runtime_options(state);
+        }
         if (state.settings.triple_frame_gen != (command == frames_3x)) {
             handle_command(state, toggle_triple_frame_gen);
+        }
+        break;
+    case frames_automatic:
+        if (!state.settings.frames_auto) {
+            state.settings.frames_auto = true;
+            // 3X runs on what "Prefer FPS over latency" sets up, as the
+            // manual 3X does.
+            state.settings.deep_pipeline = true;
+            update_runtime_options(state);
+            show_balloon(
+                state,
+                L"Automatic 2X or 3X: on",
+                L"3X while the game falls short of half your headset's refresh "
+                L"rate, 2X again once it has a display period to spare at 3X. "
+                L"Switches in a running game within a moment.");
         }
         break;
     case show_benchmark:

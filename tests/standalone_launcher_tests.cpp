@@ -516,7 +516,7 @@ int main() {
             "[ofxr]\r\nbackend=fidelityfx\r\nframe_generation=dlss\r\ndlssg_resolution=100\r\n"
             "dlssg_camera=1\r\nmotion_vectors=dlss\r\ndlss_flow_hybrid=0\r\nextrapolate=0\r\n"
             "nvidia_preset=fast\r\nnvidia_input_scale=75\r\nnvidia_bidirectional=1\r\n"
-            "deep_pipeline=0\r\ntriple_frame_gen=1\r\nexcluded_processes=Other.exe\r\n"
+            "deep_pipeline=0\r\ntriple_frame_gen=1\r\nframes_auto=1\r\nexcluded_processes=Other.exe\r\n"
             "[diagnostics]\r\nlogging_enabled=1\r\n";
         const bool changed = adopt_runtime_ini(adopted, from_panel);
         if (!changed || adopted.frame_generation != FrameGeneration::native_dlss || adopted.native_scale != 100 ||
@@ -524,6 +524,7 @@ int main() {
             adopted.nvidia_preset != NvidiaPerformancePreset::fast ||
             adopted.nvidia_input_scale != NvidiaInputScale::three_quarter || !adopted.nvidia_bidirectional ||
             adopted.dlss_flow_hybrid || adopted.extrapolate || adopted.deep_pipeline || !adopted.triple_frame_gen ||
+            !adopted.frames_auto ||
             adopted.excluded_processes != "Keep.exe" || adopt_runtime_ini(adopted, from_panel)) {
             std::cerr << "adopting the runtime ini failed\n";
             return 1;
@@ -568,6 +569,20 @@ int main() {
             std::cerr << "adopting a running session failed: retired " << retired
                       << " running " << still_running << " opened " << opened << " stopped "
                       << stopped << " gone " << (gone == nullptr) << "\n";
+            return 1;
+        }
+    }
+
+    // "Automatic 2X or 3X" travels through tray.ini and the runtime ini, off
+    // by default.
+    {
+        LauncherSettings automatic;
+        automatic.frames_auto = true;
+        if (!parse_settings(serialize_settings(automatic)).frames_auto ||
+            !contains(build_runtime_ini(automatic), "\r\nframes_auto=1\r\n") ||
+            release_defaults.frames_auto ||
+            !contains(build_runtime_ini(release_defaults), "\r\nframes_auto=0\r\n")) {
+            std::cerr << "automatic frames setting failed\n";
             return 1;
         }
     }

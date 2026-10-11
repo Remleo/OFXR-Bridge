@@ -1188,6 +1188,25 @@ struct SessionState {
     bool triple_switchable{};
     // The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point triple_poll_at{};
+    // [ofxr] frames_auto: 2X or 3X chosen live from what the game keeps up
+    // with (apply_live_frame_multiplier). The presenter thread counts its
+    // frames and the repeats among them; the game's xrEndFrame adds what it
+    // waited in the layer this frame (the admission wait and the pair hold,
+    // where a game's slack lands); the xrEndFrame thread keeps the moving
+    // measures and decides.
+    bool frames_auto{};
+    std::chrono::steady_clock::time_point frames_auto_since{};
+    std::atomic<std::uint64_t> auto_presenter_frames{};
+    std::atomic<std::uint64_t> auto_presenter_repeats{};
+    std::atomic<std::int64_t> auto_frame_slack_ns{};
+    std::uint64_t auto_frames_seen{};
+    std::uint64_t auto_repeats_seen{};
+    std::array<std::pair<std::uint32_t, std::uint32_t>, 8> auto_window{};
+    std::size_t auto_window_filled{};
+    std::size_t auto_window_next{};
+    double auto_slack_ema_ns{-1.0};
+    std::chrono::steady_clock::time_point auto_last_end_frame{};
+    double auto_interval_ema_ns{-1.0};
     // The application's xrEndFrame thread only: the run of pairs that waited
     // at admission observe_admission_wait counts, how many runs long it must
     // be, and the presenter frame it adds to the next once-per-pair hold.
@@ -6067,6 +6086,9 @@ XrResult layer_create_session_impl(
     }
     const bool triple_requested =
         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
+    state->frames_auto =
+        xrfg::implicit_layer::read_frames_auto(current_layer_directory());
+    state->frames_auto_since = std::chrono::steady_clock::now();
     state->single_swapchain_rings =
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->capture_at_end_frame =
@@ -10698,6 +10720,10 @@ void continuous_presenter_main(
             request ? request->sequence : 0,
             static_cast<std::uint64_t>(submitted_content_time),
             static_cast<std::uint64_t>(frame_state.predictedDisplayTime));
+        state->auto_presenter_frames.fetch_add(1, std::memory_order_relaxed);
+        if (!request) {
+            state->auto_presenter_repeats.fetch_add(1, std::memory_order_relaxed);
+        }
         if (XR_SUCCEEDED(end_result) && state->presenter_display_period > 0) {
             state->runtime_slowed.store(
                 frame_state.predictedDisplayPeriod >
@@ -11225,6 +11251,11 @@ void wait_for_presenter_pair(
             state->presenter_stop_requested) {
             return;
         }
+        // The game's slack, for the automatic multiplier.
+        state->auto_frame_slack_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - entered).count(),
+            std::memory_order_relaxed);
         // Diagnostic only, and the number this hold is judged by. Assigning
         // the presenter's serial rather than advancing by the pair means an
         // application that arrives late catches up in one step: the surplus
@@ -13815,6 +13846,67 @@ void follow_synthetic_pose(SessionState& state) noexcept {
 // follows primes rather than pairing across the change. The application
 // sees its period step between two and three display periods at its next
 // wait, and one frame without synthetics.
+// Automatic 2X or 3X (`[ofxr] frames_auto`): the shape the game keeps up
+// with. At 2X the layer paces a game that can to exactly two display
+// periods a frame; one that cannot comes later than that with no slack in
+// the layer's waits (the presenter repeats meanwhile, 18% of what a 120 Hz
+// headset showed of a 37 frames-a-second Stellar Blade). When the game's
+// frame interval has run over 2.15 periods for two seconds, with under a
+// quarter period of slack, it goes to 3X, where it is paced to a third of
+// the rate. At 3X a game that finishes its frame within two periods waits
+// the third out in the pair hold or the admission wait: when that slack has
+// run over 1.15 periods a frame, it goes back to 2X. Three seconds in a
+// shape before leaving it, four at 3X, and nothing while SteamVR halves the
+// rate. The repeats are counted for the record (1700) but not judged: a
+// starved presenter repeats on one runtime and waits on another.
+[[nodiscard]] std::uint32_t automatic_frame_multiplier(
+    SessionState& state,
+    std::chrono::steady_clock::time_point now) noexcept {
+    const std::uint32_t current = state.frames_per_application_frame;
+    const std::uint64_t frames = state.auto_presenter_frames.load(std::memory_order_relaxed);
+    const std::uint64_t repeats = state.auto_presenter_repeats.load(std::memory_order_relaxed);
+    state.auto_window[state.auto_window_next] = {
+        static_cast<std::uint32_t>(frames - state.auto_frames_seen),
+        static_cast<std::uint32_t>(repeats - state.auto_repeats_seen)};
+    state.auto_window_next = (state.auto_window_next + 1) % state.auto_window.size();
+    state.auto_window_filled = std::min(state.auto_window_filled + 1, state.auto_window.size());
+    state.auto_frames_seen = frames;
+    state.auto_repeats_seen = repeats;
+    const double period = static_cast<double>(state.presenter_display_period);
+    if (state.auto_window_filled < state.auto_window.size() || period <= 0.0 ||
+        state.runtime_slowed.load(std::memory_order_relaxed) || state.auto_slack_ema_ns < 0.0) {
+        return current;
+    }
+    std::uint64_t shown = 0, repeated = 0;
+    for (const auto& [f, r] : state.auto_window) {
+        shown += f;
+        repeated += r;
+    }
+    const double repeat_share = shown ? static_cast<double>(repeated) / static_cast<double>(shown) : 0.0;
+    const auto dwell = now - state.frames_auto_since;
+    // 1700, each poll: a the repeats in a thousand shown over the window,
+    // b the game's slack a frame in microseconds, c the frames now in the
+    // high word and the game's frame interval in microseconds in the low.
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        1700,
+        static_cast<std::uint64_t>(repeat_share * 1000.0),
+        static_cast<std::uint64_t>(std::max(state.auto_slack_ema_ns, 0.0) / 1000.0),
+        (static_cast<std::uint64_t>(current) << 32) |
+            static_cast<std::uint32_t>(std::max(state.auto_interval_ema_ns, 0.0) / 1000.0));
+    if (state.auto_interval_ema_ns < 0.0) {
+        return current;
+    }
+    if (current == 2U && dwell >= std::chrono::seconds(3) &&
+        state.auto_interval_ema_ns > 2.15 * period && state.auto_slack_ema_ns < 0.25 * period) {
+        return 3U;
+    }
+    if (current == 3U && dwell >= std::chrono::seconds(4) && state.auto_slack_ema_ns > 1.15 * period) {
+        return 2U;
+    }
+    return current;
+}
+
 void apply_live_frame_multiplier(
     const std::shared_ptr<SessionState>& state,
     bool use_continuous_presenter) noexcept {
@@ -13822,20 +13914,53 @@ void apply_live_frame_multiplier(
         if (!state->triple_switchable) {
             return;
         }
+        // Last frame's waits in the layer, the game's slack; folded into
+        // the moving measure every frame, whatever the poll.
+        const std::int64_t slack = state->auto_frame_slack_ns.exchange(0, std::memory_order_relaxed);
+        const auto now = std::chrono::steady_clock::now();
+        if (state->frames_auto) {
+            state->auto_slack_ema_ns = state->auto_slack_ema_ns < 0.0
+                ? static_cast<double>(slack)
+                : state->auto_slack_ema_ns * 0.9 + static_cast<double>(slack) * 0.1;
+            // The game's frame interval, xrEndFrame to xrEndFrame.
+            if (state->auto_last_end_frame != std::chrono::steady_clock::time_point{}) {
+                const double interval = static_cast<double>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now - state->auto_last_end_frame).count());
+                state->auto_interval_ema_ns = state->auto_interval_ema_ns < 0.0
+                    ? interval : state->auto_interval_ema_ns * 0.9 + interval * 0.1;
+            }
+        }
+        state->auto_last_end_frame = now;
         // The ini is rewritten by the tray; a read every quarter second is
         // cheap and nothing here is urgent.
-        const auto now = std::chrono::steady_clock::now();
         if (now < state->triple_poll_at) {
             return;
         }
         state->triple_poll_at = now + std::chrono::milliseconds(250);
-        const std::uint32_t target =
-            xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory()) &&
-                    !native_triple_limited(*state)
-                ? 3U
-                : 2U;
+        const auto directory = current_layer_directory();
+        const bool limited = native_triple_limited(*state);
+        const bool automatic = xrfg::implicit_layer::read_frames_auto(directory);
+        if (automatic != state->frames_auto) {
+            state->frames_auto = automatic;
+            state->frames_auto_since = now;
+            state->auto_slack_ema_ns = -1.0;
+            state->auto_interval_ema_ns = -1.0;
+            state->auto_window_filled = 0;
+        }
+        std::uint32_t target = xrfg::implicit_layer::read_triple_frame_gen(directory) && !limited ? 3U : 2U;
+        std::uint64_t reason = 2;
+        if (automatic && use_continuous_presenter && !limited) {
+            target = automatic_frame_multiplier(*state, now);
+            reason = 3;
+        }
         if (target == state->frames_per_application_frame) {
             return;
+        }
+        if (automatic) {
+            state->frames_auto_since = now;
+            state->auto_window_filled = 0;
+            state->auto_slack_ema_ns = -1.0;
+            state->auto_interval_ema_ns = -1.0;
         }
         if (use_continuous_presenter &&
             XR_FAILED(wait_for_presenter_idle(state))) {
@@ -13861,12 +13986,14 @@ void apply_live_frame_multiplier(
             state->application_served_serial = state->presenter_frame_serial;
         }
         clear_generation_continuity(state);
+        // 700: a the frames per game frame now, b the deeper pipeline, c 2
+        // a change of the tray's 3X setting, 3 the automatic choice.
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_transition,
             700,
             target,
             deep ? 1u : 0u,
-            2);
+            reason);
     } catch (...) {
     }
 }
@@ -13965,8 +14092,11 @@ void apply_panel_change(const std::shared_ptr<SessionState>& state, const xrfg::
         std::int64_t mode = 0;
         switch (change.setting) {
         case PanelSetting::frames:
-            ok = embedded::set_runtime_key(L"triple_frame_gen", change.choice ? L"1" : L"0");
-            // apply_live_frame_multiplier reads the key at its next poll.
+            // 0 2X, 1 3X, 2 automatic, which starts from the shape running.
+            ok = embedded::set_runtime_key(L"frames_auto", change.choice == 2 ? L"1" : L"0") &&
+                 (change.choice == 2 ||
+                  embedded::set_runtime_key(L"triple_frame_gen", change.choice ? L"1" : L"0"));
+            // apply_live_frame_multiplier reads the keys at its next poll.
             state->triple_poll_at = {};
             if (!state->triple_switchable) mode = 1;
             break;
@@ -14097,7 +14227,11 @@ void update_panel_cursor(
     asked.hybrid = layer::read_dlss_flow_hybrid(directory);
     asked.extrapolate = layer::read_extrapolate(directory);
     asked.mesh = layer::read_extrapolate_mesh(directory);
-    asked.frames = layer::read_triple_frame_gen(directory) ? 3U : 2U;
+    asked.frames_auto = layer::read_frames_auto(directory);
+    // Automatic: the running shape is the asked one, so nothing reads as a
+    // switch under way.
+    asked.frames = asked.frames_auto ? state->frames_per_application_frame.load()
+        : layer::read_triple_frame_gen(directory) ? 3U : 2U;
     asked.deep = layer::read_deep_pipeline(directory);
 
     // What the session set out to run: the method the process read when it
@@ -14709,6 +14843,10 @@ XrResult layer_end_frame_impl(
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
         }
+        state->auto_frame_slack_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - admission_entered).count(),
+            std::memory_order_relaxed);
         if (!presenter_hold_at_admission(*state) && metadata_pairable) {
             observe_admission_wait(
                 *state, std::chrono::steady_clock::now() - admission_entered);

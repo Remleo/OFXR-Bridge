@@ -109,6 +109,8 @@ struct PanelMethod {
     bool mesh{true};
     // Frames shown per game frame (2X or 3X), and the deeper pipeline.
     std::uint32_t frames{2};
+    // The layer choosing 2X or 3X live (frames is then the shape running).
+    bool frames_auto{};
     bool deep{};
 };
 

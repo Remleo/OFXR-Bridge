@@ -1379,6 +1379,34 @@ with the panel, and Lies of P under UEVR (D3D12, 1349 DLSS evaluations in
 1362 frames). A D3D11 game with a swapchain per eye and DLSS, the case the
 adaptation is for, was not at hand.
 
+#### Automatic 2X or 3X
+
+A game under half the refresh rate at 2X repeats frames (Stellar Blade at
+37 frames a second on a 90 Hz simulator: 16.5 repeats a second, 44% of its
+game frames covering three display periods; on a 120 Hz Steam Frame worse),
+and extrapolation, which turns the deeper pipeline off, has no slack to
+hide one late frame. `[ofxr] frames_auto=1` (the tray's **Automatic** under
+*Frames shown per game frame*, the panel's **Per frame** row) has the layer
+choose the shape live, through the same switch the tray's 3X uses
+(`apply_live_frame_multiplier`), so it needs `triple_switchable`. The
+measures, kept on the xrEndFrame thread: the game's frame interval,
+xrEndFrame to xrEndFrame, and its slack, the time it spent in the admission
+wait and the pair hold, both as exponential averages over about ten frames;
+the presenter's frames and repeats over the last two seconds
+(`auto_presenter_frames`, `auto_presenter_repeats`), counted but not
+judged, since a starved presenter repeats on one runtime and waits on
+another (the fake runtime of the tests shows no repeat at all). The rule
+(`automatic_frame_multiplier`): at 2X, after three seconds in the shape,
+an interval over 2.15 display periods with under a quarter period of
+slack goes to 3X; at 3X, after four seconds, slack over 1.15 periods a
+frame goes back to 2X; nothing while SteamVR halves the rate, and each
+switch resets the measures. Every poll writes `presenter_transition` 1700
+(a repeats in a thousand shown, b slack in microseconds, c the shape in
+the high word and the interval in microseconds in the low), and a switch
+writes 700 with c=3. `xrfg_layer_auto_frames` paces the fake application
+with a sleep: 25 ms a frame against a 10 ms period went to 3X after 3.0
+s, and 2 ms a frame came back to 2X 4.2 s later.
+
 #### Extrapolation in Stellar Blade: pacing, placement and prediction
 
 A report of "a lot of stuttering and ghosting" in the ASW-like mode (a 120

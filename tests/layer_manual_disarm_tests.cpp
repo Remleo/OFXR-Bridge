@@ -66,6 +66,10 @@ int main(int argc, char** argv) {
     // "steamvr-switch": a frame-generation setting changed from the tray while
     // the SteamVR presenter is running with frames queued.
     const bool switch_test = mode == "steamvr-switch";
+    // "auto-frames": frames_auto=1 on the SteamVR presenter; a game that
+    // cannot keep half the refresh rate is given 3X, and one that then has a
+    // period to spare at 3X is given 2X back.
+    const bool auto_test = mode == "auto-frames";
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
     const std::string loop_runtime = frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
@@ -81,7 +85,7 @@ int main(int argc, char** argv) {
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
-    g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr" || switch_test;
+    g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr" || switch_test || auto_test;
     g_d3d11_interop_mode = mode == "d3d11";
     // The interop keeps the private rings; every D3D12 mode takes the
     // single-swapchain rings the shipped ini turns on.
@@ -121,8 +125,9 @@ int main(int argc, char** argv) {
         {
             std::ofstream ini(root / L"ofxr_bridge.ini");
             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
+                << (auto_test ? "\nframes_auto=1" : "")
                 // The hand-off is read back from the flight log.
-                << "\n[diagnostics]\nlogging_enabled=" << (handoff_loop || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << "\n[diagnostics]\nlogging_enabled=" << (handoff_loop || auto_test || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
@@ -505,6 +510,67 @@ int main(int argc, char** argv) {
                 "generation continues after a live setting change");
             std::cout << "steamvr-switch: " << g_synthetic_release_calls.load() - synthetic_before
                       << " synthetic frames after the change" << std::endl;
+            result = 0;
+            throw FinishedEarly{};
+        }
+        if (auto_test) {
+            // Frames paced by a sleep: 25 ms of "work" a frame against the
+            // fake runtime's 10 ms period cannot keep 2X's 20 and repeats;
+            // 2 ms leaves a period and more to spare at 3X.
+            const auto frames_until = [&](XrDuration period_wanted, DWORD work_ms, int seconds,
+                                          const char* what) {
+                const auto started = std::chrono::steady_clock::now();
+                const auto deadline = started + std::chrono::seconds(seconds);
+                int frames = 0;
+                while (std::chrono::steady_clock::now() < deadline) {
+                    Sleep(work_ms);
+                    require(XR_SUCCEEDED(begin(session, nullptr)), what);
+                    capture();
+                    submit(current.predictedDisplayTime);
+                    require(wait_for_queue_idle(), what);
+                    require(XR_SUCCEEDED(wait(session, nullptr, &current)), what);
+                    ++frames;
+                    if (current.predictedDisplayPeriod == period_wanted) {
+                        return std::make_pair(true, std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - started).count());
+                    }
+                }
+                return std::make_pair(false, 0.0);
+            };
+            const auto explain = [&](const char* what) {
+                // The controller's polls (1700) and what the presenter showed.
+                std::filesystem::path newest;
+                for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                    const auto name = entry.path().filename().string();
+                    if (name.rfind("ofxr-bridge-flight-", 0) == 0 && (newest.empty() || entry.path() > newest))
+                        newest = entry.path();
+                }
+                if (newest.empty()) { std::cerr << what << ": no flight log" << std::endl; return; }
+                std::ifstream in(newest, std::ios::binary);
+                std::string line; int repeats = 0, shown = 0, switches = 0; std::vector<std::string> polls;
+                while (std::getline(in, line)) {
+                    if (line.find("op=presenter_content") != std::string::npos) {
+                        ++shown;
+                        if (line.find("result=0 ") != std::string::npos) ++repeats;
+                    } else if (line.find("op=presenter_transition result=1700") != std::string::npos) {
+                        polls.push_back(line.substr(line.find("ms=")));
+                    } else if (line.find("op=presenter_transition result=700 ") != std::string::npos) {
+                        ++switches;
+                    }
+                }
+                std::cerr << what << ": " << shown << " shown, " << repeats << " repeats, " << switches
+                          << " switches, " << polls.size() << " polls" << std::endl;
+                for (std::size_t i = polls.size() > 12 ? polls.size() - 12 : 0; i < polls.size(); ++i)
+                    std::cerr << "  " << polls[i] << std::endl;
+            };
+            const auto up = frames_until(kFakeDisplayPeriod * 3, 25, 15, "slow frames");
+            if (!up.first) explain("slow frames");
+            require(up.first, "a game under half the refresh rate is given 3X");
+            const auto down = frames_until(kFakeDisplayPeriod * 2, 2, 15, "fast frames");
+            if (!down.first) explain("fast frames");
+            require(down.first, "a game with a period to spare at 3X is given 2X back");
+            std::cout << "auto-frames: 3X after " << up.second << " s, 2X back after "
+                      << down.second << " s" << std::endl;
             result = 0;
             throw FinishedEarly{};
         }

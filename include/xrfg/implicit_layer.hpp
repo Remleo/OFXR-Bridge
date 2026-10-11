@@ -131,6 +131,14 @@ struct ConfiguredNvidiaOptions {
 // "3X Frame Gen".
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
+// `[ofxr] frames_auto`: 2X or 3X chosen live from what the game keeps up
+// with, where 3X can be followed live (the layer's
+// apply_live_frame_multiplier): 3X when the game cannot keep half the
+// refresh rate at 2X, 2X back when it has a display period to spare at 3X.
+// Off unless set to 1; triple_frame_gen is then the starting shape. The
+// tray calls it "Automatic 2X or 3X".
+[[nodiscard]] bool read_frames_auto(
+    const std::filesystem::path& module_directory) noexcept;
 
 // `[ofxr] dlss_flow_hybrid`: in a game with DLSS vectors, OFXR runs
 // FidelityFX's optical flow as well and composes each pixel from whichever

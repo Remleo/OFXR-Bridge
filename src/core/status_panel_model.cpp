@@ -172,6 +172,7 @@ enum class Engine {
 
 [[nodiscard]] std::string shape_text(const PanelMethod& method) {
     std::string text = method.frames > 2 ? ", 3X" : ", 2X";
+    if (method.frames_auto) text += " (auto)";
     if (method.deep) text += ", deep";
     return text;
 }
@@ -288,7 +289,8 @@ std::vector<PanelEditable> panel_editables(const StatusPanelInput& input) {
     const PanelMethod& asked = input.asked;
     {
         // Not "Frames": the status has a line of that name.
-        PanelEditable frames{PanelSetting::frames, "Per frame", {"2X", "3X"}, asked.frames > 2 ? 1 : 0};
+        PanelEditable frames{PanelSetting::frames, "Per frame", {"2X", "3X", "auto"},
+                             asked.frames_auto ? 2 : asked.frames > 2 ? 1 : 0};
         if (input.graphics == PanelGraphics::d3d11_interop) {
             frames.available = false;
             frames.note = "not through the D3D11 interop";
@@ -528,6 +530,9 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
             }
         } else if (asked.frames < running.frames) {
             reason("Switching to 2X", PanelTone::dim);
+        }
+        if (asked.frames_auto && !input.presenter) {
+            reason("Automatic 2X or 3X waits for the presenter thread", PanelTone::dim);
         }
         if (set.deep && !running.deep && running.frames <= 2 && input.shallow_fallback) {
             reason("The runtime refused a fourth swapchain: shallow pipeline", PanelTone::warn);

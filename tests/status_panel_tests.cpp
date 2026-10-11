@@ -431,6 +431,11 @@ int main(int argc, char** argv) {
                         rows[6].setting == PanelSetting::pipeline && !rows[6].live,
                     "OFXR editables");
             require(rows.back().setting == PanelSetting::pause, "pause last");
+            auto automatic = input;
+            automatic.asked.frames_auto = true;
+            require(panel_editables(automatic)[0].current == 2 &&
+                        panel_editables(automatic)[0].choices.size() == 3,
+                    "automatic frames editable");
             auto through_interop = input;
             through_interop.graphics = PanelGraphics::d3d11_interop;
             require(!panel_editables(through_interop)[0].available, "3X not editable through the interop");
@@ -484,9 +489,10 @@ int main(int argc, char** argv) {
             require(!panel_cursor_apply(cursor, rows, PanelCommand::down, 0) && cursor.row == 0, "down wraps");
             require(!panel_cursor_apply(cursor, rows, PanelCommand::confirm, 0), "nothing staged, nothing applied");
             require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 100) && cursor.staged == 1, "staged 3X");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 100) && cursor.staged == 2, "staged auto");
             require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 100) && cursor.staged == -1,
                     "back round to the current choice stages nothing");
-            require(!panel_cursor_apply(cursor, rows, PanelCommand::left, 100) && cursor.staged == 1, "left wraps");
+            require(!panel_cursor_apply(cursor, rows, PanelCommand::left, 100) && cursor.staged == 2, "left wraps");
             require(!panel_cursor_apply(cursor, rows, PanelCommand::down, 100) && cursor.staged == -1, "moving drops");
             require(!panel_cursor_apply(cursor, rows, PanelCommand::up, 100) && cursor.row == 0, "back up");
             require(!panel_cursor_apply(cursor, rows, PanelCommand::right, 200) && cursor.staged == 1, "staged again");

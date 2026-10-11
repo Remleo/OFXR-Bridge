@@ -142,7 +142,8 @@ std::wstring active_method_summary(const LauncherSettings& settings) {
     } else {
         text += L" " + std::to_wstring(input_scale_percent(settings.nvidia_input_scale)) + L"%";
     }
-    text += settings.triple_frame_gen ? L" \u00B7 3X" : L" \u00B7 2X";
+    text += settings.frames_auto ? L" \u00B7 2X or 3X"
+        : settings.triple_frame_gen ? L" \u00B7 3X" : L" \u00B7 2X";
     return text;
 }
 
