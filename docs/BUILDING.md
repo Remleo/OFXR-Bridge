@@ -1606,6 +1606,24 @@ a faint doubled edge along the ponytail on the two longest, against the
 single 50 ms pair of the run shown as B. So the cut stays at 1.55: below
 it a generated frame costs a hair's edge, a repeated one a visible stutter.
 
+The three methods on the same play. The recipe was then run with the
+tray on each method in turn (captures `hitch_r32_user`, `hitch_r32_ofxr`,
+`hitch_r32_extrap`; the same street, the same orbit, the same stalls), and
+the head crops of the steady 22 to 27 ms pairs tell them apart at once.
+Native DLSS Frame Generation: clean, her face and hair sharp against the
+moving background. OFXR's hybrid: a mild double along her hair and the
+sword's hilt on a steady pair, and on a 36 ms pair under the cut (1.4
+times) a strong second copy of her head and torso beside the first, the
+same double image the forced hitches showed at 2x. Extrapolation: her
+face and hair smeared and doubled on the side views, the background
+stretched where she uncovers it, the front view mostly fine; its hitch
+pairs show B as the others do. All three held the presenter with no
+quarantine (the game runs 26 to 37 frames a second on that simulator, so
+all three repeat frames). For a close third-person character under a
+turning camera, then, native generation is the method; the hybrid's
+double on ordinary pairs is the next thing to look at in OFXR's own path,
+and extrapolation is for latency, not for this.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:
