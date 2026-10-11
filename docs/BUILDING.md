@@ -1565,6 +1565,42 @@ quarantine. Into the Radius 2 created its session and then submitted no
 layers at all for the three minutes it was watched (a loading or launcher
 state the unattended run never left), so it was not measured.
 
+In play, not in menus. Every unattended batch above measured what a game
+shows a minute after launch, which is its title screen or main menu;
+Deep Rock Galactic was the exception by accident, since it loads straight
+into a 3D scene. Menus validate the arming, the presenter against inline,
+the pacing and the quarantines, and nothing about generation on real
+vectors and depth, disocclusion, moving UI, in-play frame-time variance
+or the camera fit on real turns. From 2026-10-11 the runs reach play
+first. The tools (all under `build\GalacticRacer-native-DLSSG-test-...`,
+grown from the Stellar Blade recipe): keys posted to the game's
+`UnrealWindow` (`sb_gameplay/keys.py`), a UEVR plugin that fills XInput
+pad 0 from a text file for walking and turning
+(`stick_driver6.dll`, then `padconnect.py` so Unreal polls the pad), a real
+mouse click through `SetCursorPos` and `SendInput` where a menu button
+takes nothing else (Hellblade II's first-launch pages, RoboCop's menus,
+whose cursor the game scales by 2.25 against its window), the layer's
+diagnostics (`query_ofxr.py`: method, guides used) and a screenshot of the
+simulator's eye view against the game's flat window. What the first round
+found, on the release 32 layer with the user's settings (native DLSS Frame
+Generation, 100%, camera off, 2X, hybrid), Meta XR Simulator at 90 Hz:
+
+| Game | Reached | Shown a second | Hitch records (777 guided / 778 arrival skip / 779 let through) |
+|---|---|---|---|
+| Deep Rock Galactic | a mission: the drop pod, then a cave, walking and turning for 96 + 70 s (pitch dark, so no visual check) | 45.0 + 45.0, no repeats | 0 / 3 / 9, then 0 / 1 / 4 |
+| Stellar Blade Demo (OpenXR Simulator, the forced-hitch recipe) | the rain-city street, third person, the camera orbiting, 117 injected 25 ms stalls | 26.6 + 26.6 and 36.8 repeats (the game holds 26.5 there) | 61 / 2 / 2; every pair over 1.55 times the median (48.6, 50.0, 50.0, 44.7, 39.7 ms) shown as B, the steady 24 ms pairs solid, a 41.0 ms pair that passed under a storm-raised median generated with a faint double edge on her hair |
+| Hellblade II | the opening in-engine cinematic (UEVR shows it letterboxed); the playable section is many minutes in | 44.9 + 44.8 | 0 / 49 / 197 in 107 s: the 49 follow 28-45 ms frames with 28-35 ms after them, the game's own slow frames, not bunching |
+| Clair Obscur: Expedition 33 | not reached: hung on the engine splash for 110 s and exited (UEVR's known incompatibility); the earlier 45 + 45 was its title scene | | |
+| RoboCop: Rogue City | the opening in-engine cinematic (the news studio) after Play, New Main Campaign, Normal; the game caps it at 30 frames a second, with a 52 to 63 ms frame every second or so | 33.5 + 33.4 (67.6 shown, the game under half the refresh) | 0 / 96 / 0 in 103 s: each skip follows one of those doubled frames, the next frame normal, so the rule reads them as the stalls they are |
+
+No quarantine and no error in any of them; the prepare reason stayed 0
+throughout play. The arrival rule's remaining skips in Hellblade II's
+cinematic are the game's own 28 to 45 ms frames (a shot cut, streaming),
+with the next frame at 28 to 35 ms: a doubled step by the rule, where the
+peer's Stellar Blade crops put the visible ghost; whether a 1.3 to 1.6
+times step is better repeated or generated is a quality judgement the
+crops have not yet been taken for.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:
