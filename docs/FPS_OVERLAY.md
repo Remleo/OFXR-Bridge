@@ -11,7 +11,7 @@ all optical-flow paths retain V063 behavior.
 
 Tray -> **FPS overlay** -> **Upper left**, **Upper right**, **Lower left**,
 **Lower right** or **Off**. Upper right is the clean-install default. While the
-tray remains armed, this selection updates its matching running layer within the
+tray remains enabled, this selection updates its matching running layer within the
 next approximately 250 ms of application frame activity; no game restart is
 needed. Backend/preset/flow-resolution changes still require a session restart.
 

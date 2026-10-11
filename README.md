@@ -1207,25 +1207,25 @@ Blank frames compress to almost nothing in GPU memory, and NGX then measures
 
 For everyday use:
 
-1. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
+1. Run `OFXRBridgeTray.exe`. The bridge enables itself straight away.
 2. Right-click the tray icon to choose the method and options.
 3. Start the game normally. For injectors such as UEVR, start the tray before
    the game.
-4. Select **Disarm bridge**, or close the tray, when you are finished.
+4. Select **Disable**, or close the tray, when you are finished.
 
 Restarting the tray while a game is running leaves the game generating: the
-new tray takes the running session over, and **Disarm bridge** and **Exit**
+new tray takes the running session over, and **Disable** and **Exit**
 still stop it. Earlier releases stopped it for good, and only a game restart
 brought generation back.
 
 ### The tray menu
 
 The menu is grouped in the order you decide things. Its top lines say whether
-the bridge is armed or paused and which method is in use.
+the bridge is enabled, disabled or paused and which method is in use.
 
 | Entry | What it holds |
 |---|---|
-| **Disarm bridge** / **Pause frame generation** | Arming, and the pause, with its key shown beside it. |
+| **Enable** / **Disable** / **Pause frame generation** | Whether the bridge is enabled (a check marks the current state), and the pause, with its key shown beside it. |
 | **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (from the game's DLSS vectors where it has them, the chosen flow elsewhere; the cheapest), **interpolate with DLSS vectors + FidelityFX flow** (default, best quality; games without DLSS keep the chosen flow), or **extrapolate, SpaceWarp-style** (no added latency, less accurate; FidelityFX flow in every game, whatever engine is chosen above). Then **2X**, **3X** or **Automatic**. |
 | **Quality and performance** | Optical-flow resolution, NVIDIA's both-ways check, DLSS Frame Generation resolution, and Prefer FPS over latency. |
 | **Benchmark this PC...** | See below. |

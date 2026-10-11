@@ -42,7 +42,7 @@ not loaded (Table A).
 |---|---|
 | The game uses **OpenVR**, not OpenXR | OFXR only works with OpenXR games. Some OpenVR games can run through OpenXR with [OpenComposite](https://gitlab.com/znixian/OpenOVR). |
 | The game runs **as administrator** | Run the game, and Steam or its launcher, normally. Never as administrator. |
-| The tray was not armed when the game started | Start the tray first; it arms by itself. Then start the game. If you disarm and re-arm, restart the game. |
+| The tray was not enabled when the game started | Start the tray first; it enables itself. Then start the game. If you disable and enable it again, restart the game. |
 | The game runs under another Windows user | Run the tray and the game under the same Windows account. |
 | The game is 32-bit | Not supported. |
 | The game's anti-cheat blocks it | Not supported. |
@@ -54,7 +54,7 @@ not loaded (Table A).
 | You are in a menu or loading screen | Normal. Generation starts once you are in the 3D world. |
 | The game uses OpenGL | Not supported. |
 | Too many swapchains for SteamVR (some UEVR games, often with depth submission on) | Turn off **Prefer FPS over latency**, or turn off depth submission in UEVR. |
-| You disarmed OFXR from the tray | Arm it again, then restart the game. |
+| You disabled OFXR from the tray | Enable it again, then restart the game. |
 | You paused frame generation, from the tray or with the pause key (the FPS number shows two orange bars) | Choose **Resume frame generation** in the tray menu, or press the key again. No restart needed. |
 | Generation stops and starts by itself while you play | The pause key (Ctrl + Alt + F7 by default) is also a key your game or a mod uses. Choose another under **Current key binding** in the tray menu. |
 | Something else | Send a flight log (see below). |
@@ -70,10 +70,10 @@ not loaded (Table A).
 | Your GPU runs out of VRAM | OFXR needs extra video memory on top of the game (see [How much VRAM OFXR uses](#how-much-vram-ofxr-uses)). Signs: stutter, sudden drops, or a crash, often after a few minutes. Lower the game's settings or the per-eye resolution first. |
 | 3X doesn't switch while you play | The game was started with **Prefer FPS over latency** off. Restart the game. |
 | The number stops short of the refresh rate (110 to 115 at 120 Hz, for example), although the game runs above half of it without OFXR | Generating frames costs GPU time too, so the game needs some headroom above half the refresh rate. Lower the refresh rate, the per-eye resolution or the optical-flow resolution. Example: No Man's Sky ran at 94 FPS without OFXR; OFXR gave an even 100 at 100 Hz and 113 to 115 at 120 Hz, because a real frame plus a generated one took about 17.7 ms and 120 Hz allows 16.7. |
-| Dips only in heavy scenes | Disarm OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
+| Dips only in heavy scenes | Disable OFXR and play the same scene. If the dips are still there, lower the per-eye resolution: OFXR can't make up frames the game doesn't render. |
 | One eye flickers or shimmers and the other is fine (MSFS 2024 with 3X Frame Gen) | Fixed in 0.2.12.2. Update. |
 | Stutter or drop-outs that 0.2.9.1 did not have, with VRAM to spare (seen on an AMD RX 9070 XT in AMS2) | Untick **Lower VRAM (may cause stuttering)** in the tray and restart the game. It restores the layout 0.2.9.1 used, at about 15% more VRAM. |
-| You want to know whether a problem comes from OFXR | **Disarm** and restart the game. **Pause frame generation** is not enough: a paused game still runs through OFXR, it only stops making extra frames. |
+| You want to know whether a problem comes from OFXR | **Disable** and restart the game. **Pause frame generation** is not enough: a paused game still runs through OFXR, it only stops making extra frames. |
 
 ## How much VRAM OFXR uses
 

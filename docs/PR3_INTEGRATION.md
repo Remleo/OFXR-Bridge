@@ -38,6 +38,6 @@ unresolved. Multiple simultaneous OpenXR instances were not tested; the PR's
 space-destruction interception still settles all active sessions.
 
 For testing, close the previous tray, extract the whole V068 package, start its
-tray, enable **Bridge flight recorder**, arm it and start a fresh game/OpenXR
+tray, enable **Bridge flight recorder**, enable it and start a fresh game/OpenXR
 session. Check sustained generation, recenter, menus/loading and leaving VR.
 The overlay counts accepted submissions rather than physical scanout.

@@ -56,6 +56,10 @@ enum MenuCommand : UINT {
     toggle_arm = 90,
     toggle_pause = 91,
     change_pause_key = 92,
+    // Enable and Disable are two entries, the check on the one that holds;
+    // the double-click on the icon still toggles (toggle_arm).
+    enable_bridge = 93,
+    disable_bridge = 94,
     backend_fidelity_fx = 110,
     backend_nvidia_slow = 111,
     backend_nvidia_medium = 112,
@@ -561,7 +565,7 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     namespace sl = xrfg::standalone;
     std::wstring tooltip = state.paused
         ? L"OFXR Bridge PAUSED - "
-        : state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
+        : state.armed ? L"OFXR Bridge ENABLED - " : L"OFXR Bridge DISABLED - ";
     // What the menu's top says: the method, its resolution, 2X or 3X.
     tooltip += sl::active_method_summary(state.settings);
     const bool ofxr = sl::current_method(state.settings) != sl::Method::native_dlss;
@@ -835,8 +839,8 @@ void stop_adopted_arms(AppState& state, std::wstring* errors) {
     refresh_tray_icon(state);
     show_balloon(
         state,
-        L"OFXR Bridge armed",
-        L"The bridge will remain enabled for OpenXR applications until you disarm it or exit the tray.");
+        L"OFXR Bridge enabled",
+        L"The bridge stays enabled for OpenXR applications until you disable it or exit the tray.");
     return true;
 }
 
@@ -1217,18 +1221,15 @@ void show_context_menu(AppState& state) {
     // What the bridge is doing.
     wchar_t title[96]{};
     swprintf_s(title, L"OFXR Bridge V%03u: %s", kImplementationVersion,
-               state.paused ? L"paused" : state.armed ? L"armed" : L"not armed");
+               state.paused ? L"paused" : state.armed ? L"enabled" : L"disabled");
     append_note(menu, title, true);
     append_note(menu, L"Frame generation: " + sl::active_method_summary(settings));
     if (!native) append_note(menu, L"OFXR is " + sl::ofxr_mode_name(mode));
     append_separator(menu);
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.armed ? MF_CHECKED : MF_UNCHECKED),
-        toggle_arm,
-        state.armed
-            ? L"Disarm bridge"
-            : L"Arm bridge until manual disarm");
+    // Enabled or disabled, said that way: "Arm bridge until manual disarm"
+    // read as a warning to people who only wanted it on.
+    append_entry(menu, enable_bridge, L"Enable", state.armed);
+    append_entry(menu, disable_bridge, L"Disable", !state.armed);
     // The key is shown beside the entry it presses.
     const std::wstring key = xrfg::standalone::parse_hotkey(settings.pause_hotkey)
         ? pause_key_display(settings.pause_hotkey) : std::wstring();
@@ -1468,6 +1469,12 @@ void show_context_menu(AppState& state) {
 
 void handle_command(AppState& state, UINT command) {
     switch (command) {
+    case enable_bridge:
+        if (!state.armed) handle_command(state, toggle_arm);
+        break;
+    case disable_bridge:
+        if (state.armed) handle_command(state, toggle_arm);
+        break;
     case toggle_arm:
         if (state.armed) {
             std::wstring error;
@@ -1491,7 +1498,7 @@ void handle_command(AppState& state, UINT command) {
                 show_balloon(
                     state,
                     L"Frame generation paused",
-                    L"Running games still go through the bridge. To rule OFXR out, disarm and restart the game.");
+                    L"Running games still go through the bridge. To rule OFXR out, disable the bridge and restart the game.");
             } else {
                 show_balloon(
                     state,
