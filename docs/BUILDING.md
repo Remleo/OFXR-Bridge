@@ -1596,10 +1596,15 @@ Generation, 100%, camera off, 2X, hybrid), Meta XR Simulator at 90 Hz:
 No quarantine and no error in any of them; the prepare reason stayed 0
 throughout play. The arrival rule's remaining skips in Hellblade II's
 cinematic are the game's own 28 to 45 ms frames (a shot cut, streaming),
-with the next frame at 28 to 35 ms: a doubled step by the rule, where the
-peer's Stellar Blade crops put the visible ghost; whether a 1.3 to 1.6
-times step is better repeated or generated is a quality judgement the
-crops have not yet been taken for.
+with the next frame at 28 to 35 ms. Whether a 1.3 to 1.5 times step is
+better generated or shown as B was then measured with the same Stellar
+Blade recipe and the suspend shortened to 12 ms
+(`sb_gameplay/hitch_run_stall.sh`, `STALL_S=0.012`, capture
+`hitch_r32_stall12`): pairs of 30.5, 32.0, 34.0 and 33.8 ms against a 24
+ms median, all generated, her body and face solid in every one and only
+a faint doubled edge along the ponytail on the two longest, against the
+single 50 ms pair of the run shown as B. So the cut stays at 1.55: below
+it a generated frame costs a hair's edge, a repeated one a visible stutter.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
