@@ -1365,9 +1365,33 @@ are per-eye features without the camera (`XRFG_NATIVE_DLSSG_CAMERA=0
 XRFG_NATIVE_DLSSG_PER_EYE=1`), the previous fit used unscaled and never
 dropped (`XRFG_TEST_NATIVE_FIT_SCALE=0`), and the fit scaled by the
 frame-time ratio and never dropped (`XRFG_TEST_NATIVE_FIT_DROP=0`, a knob
-added for this), each under the same injected stalls. Until that is
-settled the camera option is off on the test rig and is not recommended
-for Stellar Blade.
+added for this), each under the same injected stalls.
+
+The cuts ran (`hitch_a_cam0_pereye`, `hitch_c_cam1_nodrop`), and then two
+wide runs of the user's own configuration, the shared feature with the
+camera off, eight sequences of six frames over fourteen seconds of orbit
+with each library (`hitch_user_shared_orig_wide`,
+`hitch_user_shared_new_wide`). Per-eye features ghost most hitch pairs with
+either library and with or without the split; the shared feature ghosted
+1 of 4 such pairs on 310.1.0 (a three-quarter view with the phone booth
+and car behind her head) and 2 to 3 of 4 on 310.9.1 (side-on, her face
+and head translucent with the stairs and road through them), after a first
+shared 310.9.1 run with 0 of 4. So it is NGX at a doubled step, whatever
+the library or the feature layout; the shared feature is better than one
+per eye, which is the camera option's warning, and the library advice does
+not hold. What a busy near occluder does on such a pair (a phone booth
+sweeping past the camera on a 45 ms pair, half-transparent over her) is the
+same step seen from the other side. The only frame that does not show the
+ghost is the real one, so native generation now skips a pair whose frame
+time runs over 1.55 times the median of the eight before it
+(`Skip::hitch`; the synthesizer shows the current frame as it does for a
+guide skip, and the status is left alone) - one repeated frame where the
+game hitched anyway. The ratio is against a median, so a game that settles
+at a lower rate generates again after four pairs, and a pair that misses
+one display slot at 2X (1.5 times) is kept. `XRFG_NATIVE_DLSSG_HITCH_SKIP=0`
+turns it off; the decision log writes `hitch ... skipped` for each. The
+same wide capture with the rule in is the confirmation that no hitch pair
+shows a generated frame.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
@@ -1576,7 +1600,10 @@ read 35.7 while another session's CPU work ran beside it; alone, 44.9 at
 the one the rule reached: inline in the earlier round at 28.4 game frames
 a second with its pairs bunched (`last 10 s (inline)`), it now asks for the
 presenter on its first generating frame (601, then 602) and runs 44.9 +
-44.9 a second, 14 repeats in a minute, no quarantine. Since the forwarded
+44.9 a second, 14 repeats in a minute, no quarantine. A D3D11 presenter
+has a history (DCS World's split loop faulted the driver), so FlatOut was
+soaked for 318 s on it: 44.6 + 44.5 a second throughout, 38 repeats in
+27,228 shown frames, no quarantine, no presenter stop. Since the forwarded
 wait can overlap a render thread's work in a pipelined game, room to spare
 inline also needs
 the xrEndFrame thread's CPU share of its wall time (`GetThreadTimes` a

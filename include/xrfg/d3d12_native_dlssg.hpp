@@ -29,6 +29,7 @@ class D3D12NativeDlssG final {
         multi_frame_unsupported, // more outputs than the adapter's feature generates
         feature_unavailable,     // NGX could not create the feature; retried later
         evaluate_failed,         // NGX rejected an evaluation; the history reseeds
+        hitch,                   // the pair spans a game hitch; the real frame is shown
     };
     D3D12NativeDlssG();
     ~D3D12NativeDlssG();

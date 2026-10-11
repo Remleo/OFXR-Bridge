@@ -4010,6 +4010,7 @@ struct D3D12FrameSynthesizer::Impl {
                     copy(slot.command_list.Get(), outputs[output].image);
                 switch (native_dlss->last_skip()) {
                 case D3D12NativeDlssG::Skip::resizing:
+                case D3D12NativeDlssG::Skip::hitch:
                     break;
                 case D3D12NativeDlssG::Skip::multi_frame_unsupported:
                     report_dlss_motion_vector_status(DlssMotionVectorStatus::multi_frame_unsupported);

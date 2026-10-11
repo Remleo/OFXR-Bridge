@@ -575,6 +575,36 @@ struct D3D12NativeDlssG::Impl {
     std::array<FitReadback, kSlots> fits;
     UINT fit_slot{kSlots};
     bool camera_motion{};
+    // A pair whose frame time runs over 1.55 times the median of the eight
+    // before it is not generated (XRFG_NATIVE_DLSSG_HITCH_SKIP=0 turns it
+    // off): at a doubled step NGX leaves a third-person character
+    // half-transparent for the generated frame, with either DLSS-G library
+    // and either feature layout, and the only frame that does not show it
+    // is the real one. Live in Stellar Blade (2X, 100%, the process
+    // suspended 25 ms three times in a capture to force 50 ms pairs between
+    // 27 ms ones): with the shared feature 1 of 4 such pairs ghosted on
+    // 310.1.0 and 2 to 3 of 4 on 310.9.1 across two wide runs, and with a
+    // feature per eye most of them, whatever the library; the pairs around
+    // them were clean. The ratio is taken against a median, not the pair
+    // before, so a game that settles at a lower rate is generating again
+    // after four pairs, and a pair that merely misses one display slot at
+    // 2X (1.5 times) is kept.
+    bool hitch_skip{true};
+    std::array<float, 8> frame_times{};
+    UINT frame_times_count{}, frame_times_next{};
+    std::uint64_t hitch_skips{};
+    [[nodiscard]] float frame_time_median() const noexcept {
+        if (frame_times_count == 0) return 0.0F;
+        std::array<float, 8> sorted = frame_times;
+        std::sort(sorted.begin(), sorted.begin() + frame_times_count);
+        return frame_times_count % 2 ? sorted[frame_times_count / 2]
+                                     : 0.5F * (sorted[frame_times_count / 2 - 1] + sorted[frame_times_count / 2]);
+    }
+    void note_frame_time(float dt_ms) noexcept {
+        frame_times[frame_times_next] = dt_ms;
+        frame_times_next = (frame_times_next + 1) % UINT(frame_times.size());
+        frame_times_count = std::min(frame_times_count + 1, UINT(frame_times.size()));
+    }
     // Test only (XRFG_TEST_NATIVE_FIT_SCALE=0): a fit used unscaled.
     // Test only (XRFG_TEST_NATIVE_FIT_DROP=0): a fit scaled by the frame-time
     // ratio whatever the ratio, never dropped.
@@ -1222,6 +1252,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->camera_motion = environment(L"XRFG_NATIVE_DLSSG_CAMERA", camera ? 1U : 0U) != 0;
         p->fit_time_scale = environment(L"XRFG_TEST_NATIVE_FIT_SCALE", 1U) != 0;
         p->fit_drop = environment(L"XRFG_TEST_NATIVE_FIT_DROP", 1U) != 0;
+        p->hitch_skip = environment(L"XRFG_NATIVE_DLSSG_HITCH_SKIP", 1U) != 0;
         p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE") && !p->camera_motion;
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         p->scale = std::clamp(environment(L"XRFG_NATIVE_DLSSG_SCALE", scale), kMinScale, 100U);
@@ -1500,6 +1531,23 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                     std::uint64_t(r.offset_y) + r.height >
                         std::uint64_t(g->output_y) + g->output_height) {
                     return skip(Skip::guides);
+                }
+            }
+        }
+        // A pair spanning a game hitch is shown as its real frame (hitch_skip).
+        {
+            const auto &g0 = *bg->eyes[guide_index(0)];
+            if (p.hitch_skip && g0.frame_time_known && g0.frame_time_delta_ms > 0.0F &&
+                std::isfinite(g0.frame_time_delta_ms)) {
+                const float median = p.frame_times_count >= 4 ? p.frame_time_median() : 0.0F;
+                p.note_frame_time(g0.frame_time_delta_ms);
+                if (median > 0.0F && g0.frame_time_delta_ms > 1.55F * median) {
+                    ++p.hitch_skips;
+                    if (p.decision_log) {
+                        std::fprintf(p.decision_log, "%llu hitch serial=%llu frame_time=%.1f median=%.1f skipped\n",
+                                     GetTickCount64(), g0.serial, g0.frame_time_delta_ms, median);
+                    }
+                    return skip(Skip::hitch);
                 }
             }
         }
