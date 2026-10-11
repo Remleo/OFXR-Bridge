@@ -1649,7 +1649,31 @@ of native; and the hybrid's flow fallback earns its keep, taking the
 vectors' 5.59 to 5.08 on her. (The default replay list's "OFXR+DLSS
 vectors" is the vectors alone; the hybrid is `hybrid/medium/half` in
 `XRFG_TEST_REPLAY_FLOWS`.) The window is the number to watch for anything
-done to the hybrid's choice between its branches.
+done to the hybrid's choice between its branches, and the first thing
+done with it was to try that choice's constants. `SynthesizeHybridMidpointPS`
+asks the flow only where the vectors' two samples disagree by more than
+0.02, and then blends toward whichever branch disagrees less, with a slope
+of 8 per unit of disagreement. `XRFG_TEST_HYBRID_VARIANT` (test only,
+`SynthesisFlags` bits 5 and 6, read once from the environment) tries three
+others: 1 asks the flow only above 0.05, 2 halves the slope so the flow
+wins less easily, 3 leans 0.03 toward the vectors. Over nine steady pairs
+of the two Stellar Blade play captures, her head in eye 1:
+
+| Variant | Error over her head | Where the scene moved |
+|---|---|---|
+| 0, as shipped | 6.84 | 7.62 |
+| 1, ask the flow less | 6.88 | 7.65 |
+| 2, let the flow win less | 6.97 | 7.63 |
+| 3, lean on the vectors | 6.95 | 7.65 |
+
+The shipped rule is the best of the four on every one of the nine pairs,
+by a few hundredths to a tenth. So the hybrid's gap to native on her is
+not in that rule's constants: the flow fallback is already asked and
+weighted about right, and what remains (her edges in side views, the
+second copy at a 1.4 times step) is the flow's and the vectors' own
+limits at a disoccluding silhouette, which only native's network handles
+better. The switch stays for the next idea; it costs the shader two
+uniform compares.
 
 #### The deeper pipeline: its phase, and an automatic depth
 
