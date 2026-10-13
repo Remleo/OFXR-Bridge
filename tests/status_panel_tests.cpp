@@ -97,16 +97,20 @@ int main(int argc, char** argv) {
         constexpr std::int64_t ms = 1'000'000;
         FlipGesture gesture;
         require(!gesture.observe(0, true, false) && gesture.pending(), "shown at once");
+        require(gesture.input_hand() == -1, "controls active before the panel appears");
         require(!gesture.observe(240 * ms, true, false), "shown before a quarter second");
         require(gesture.observe(250 * ms, true, false) && !gesture.pending() && gesture.hand() == 0,
                 "not shown after a quarter second on the left hand");
+        require(gesture.input_hand() == 1, "left panel must use the right hand's controls");
         require(gesture.observe(300 * ms, false, false), "hidden at once when turned back");
+        require(gesture.input_hand() == 1, "right controls lost during the hide delay");
         require(gesture.observe(790 * ms, false, false), "hidden before half a second");
         require(gesture.observe(795 * ms, true, false), "turned over again during the hide delay");
         require(gesture.observe(1200 * ms, false, false) && gesture.observe(1690 * ms, false, false),
                 "the hide delay did not restart");
         require(!gesture.observe(1700 * ms, false, false) && gesture.hand() == -1,
                 "not hidden after half a second back up");
+        require(gesture.input_hand() == -1, "hidden panel kept its controls active");
         gesture.reset();
         gesture.observe(0, false, true);
         gesture.observe(100 * ms, false, true);
@@ -114,10 +118,13 @@ int main(int argc, char** argv) {
         require(!gesture.observe(130 * ms, false, true) && !gesture.observe(370 * ms, false, true),
                 "a break did not restart the show delay");
         require(gesture.observe(380 * ms, false, true) && gesture.hand() == 1, "right hand");
+        require(gesture.input_hand() == 0, "right panel must use the left hand's controls");
         require(gesture.observe(400 * ms, true, true) && gesture.hand() == 1,
                 "the panel moved hands while its own stayed turned");
+        require(gesture.input_hand() == 0, "controls switched while both controllers were turned");
         require(gesture.observe(420 * ms, true, false) && gesture.hand() == 0,
                 "the other turned hand did not take it over");
+        require(gesture.input_hand() == 1, "controls did not follow the panel's change of hand");
         require(gesture.observe(450 * ms, false, false) && gesture.hand() == 0,
                 "the hand is kept through the hide delay");
         FlipGesture untracked;
@@ -169,7 +176,7 @@ int main(int argc, char** argv) {
         require(std::none_of(text.lines.begin(), text.lines.end(),
                              [](const PanelLine& line) { return line.label == "Why"; }),
                 "a reason given while nothing differs");
-        require(line_labelled(text, "Vectors").text == "used on 100% of pairs", "vector share");
+        require(line_labelled(text, "Vectors").text == "accepted on 100% of checked pairs", "vector share");
         require(line_labelled(text, "Latency").text == "+2 frames (22 ms) added", "deep 2X latency at 90 Hz");
         require(line_labelled(text, "Pipeline").text == "deep, presenter thread", "pipeline text");
         require(line_labelled(text, "GPU").text == "shown while the flight recorder is on" &&
@@ -180,7 +187,7 @@ int main(int argc, char** argv) {
         input.vectors.used = 27;
         input.vectors.temporal_rejections = 3;
         text = status_panel_text(input);
-        require(line_labelled(text, "Vectors").text == "used on 90% of pairs, 3 refused" &&
+        require(line_labelled(text, "Vectors").text == "accepted on 90% of checked pairs, 3 refused" &&
                 line_labelled(text, "Vectors").tone == PanelTone::good, "partial vector share");
 
         // Vectors that stop matching: the interpolation falls back on flow.
@@ -257,7 +264,7 @@ int main(int argc, char** argv) {
                 "native with the camera's motion");
         input.running.native_camera = false;
         require(has_line(text, "makes one frame: 2X", PanelTone::warn), "native single frame");
-        require(line_labelled(text, "Guides").text == "used on 100% of pairs", "native guides");
+        require(line_labelled(text, "Guides").text == "accepted on 100% of checked pairs", "native guides");
         input.native_available = false;
         input.vectors = {PanelVectorStatus::native_unavailable, 4000, 0, 0, 0};
         text = status_panel_text(input);
@@ -312,6 +319,35 @@ int main(int argc, char** argv) {
         require(line_labelled(status_panel_text(input), "Why").text ==
                     "DLSS vectors unused: no DLSS output is the eye images' size",
                 "OFXR vectors with no DLSS output of the eye images' size");
+
+        input.vectors.dlss_width = 1920;
+        input.vectors.dlss_height = 1080;
+        input.vectors.eye_width = 2688;
+        input.vectors.eye_height = 2880;
+        text = status_panel_text(input);
+        require(line_labelled(text, "Sizes").text == "Latest DLSS 1920x1080; eye image 2688x2880" &&
+                    has_line(text, "Keep normal FoV", PanelTone::dim), "size mismatch explains the safe fallback");
+        for (bool native : {false, true}) {
+            input = generating(tray_default(), tray_default());
+            input.session.native = input.asked.native = input.running.native = native;
+            input.vectors = {PanelVectorStatus::stale_guides, 4000, 0, 12, 0};
+            text = status_panel_text(input);
+            require(has_line(text, "DLSS has not supplied a new frame", PanelTone::warn) &&
+                        has_line(text, "Menus/loading can pause DLSS", PanelTone::dim),
+                    "stale guides have a distinct explanation in OFXR and native FG");
+        }
+        input = generating(tray_default(), tray_default());
+        input.session.game_vectors = input.asked.game_vectors = input.running.game_vectors = false;
+        // A stale use counter/hybrid flag must not label deliberate optical
+        // flow as a vector fallback or keep claiming vectors are running.
+        text = status_panel_text(input);
+        require(text.state == "GENERATING" && line_labelled(text, "Running").text.find("NVIDIA flow") == 0,
+                "optical-only mode ignores old vector use counters");
+        const auto flow_only_rows = panel_editables(input);
+        const auto flow_mode = std::find_if(flow_only_rows.begin(), flow_only_rows.end(),
+            [](const PanelEditable& row) { return row.setting == PanelSetting::ofxr_mode; });
+        require(flow_mode != flow_only_rows.end() && flow_mode->current == 3 &&
+                    flow_mode->choices[3] == "optical flow only", "optical-only mode is editable in headset");
 
         // Extrapolation: no latency added, and FidelityFX flow without vectors.
         asked = tray_default();
@@ -416,14 +452,14 @@ int main(int argc, char** argv) {
         text = status_panel_text(input);
         require(line_labelled(text, "Pace").text.ends_with("so frames repeat: try a lower refresh rate"),
                 "single-frame native cannot try 3X");
-        require(line_labelled(text, "Guides").text == "used on 100% of pairs, NGX reset on 100%", "native resets");
+        require(line_labelled(text, "Guides").text == "accepted on 100% of checked pairs, NGX reset on 100%", "native resets");
         input.rates = {90.0f, 45.0f, 45.0f, 0.0f, 90.0f, -1.0f, true};
         input.vectors.native_resets = 0;
         text = status_panel_text(input);
         require(std::none_of(text.lines.begin(), text.lines.end(),
                              [](const PanelLine& line) { return line.label == "Pace"; }),
                 "a game at half the refresh needs no pace line");
-        require(line_labelled(text, "Guides").text == "used on 100% of pairs", "no resets, no mention");
+        require(line_labelled(text, "Guides").text == "accepted on 100% of checked pairs", "no resets, no mention");
 
         // Editing from the panel. The settings list follows the method asked
         // for; a row that cannot be changed here says why.
@@ -536,7 +572,7 @@ int main(int argc, char** argv) {
         // and on the bar, and more rows than the status alone.
         {
             text = status_panel_text(input);
-            require(line_labelled(text, "Settings").text == "turn the stick to choose a setting", "settings header");
+            require(line_labelled(text, "Settings").text == "use the other hand's stick to choose", "settings header");
             require(line_labelled(text, "Per frame").text == "2X" && line_labelled(text, "Buffering").text ==
                         "deep (from the next game start)", "settings rows");
             PanelCursor cursor{0, -1, -1};
@@ -578,8 +614,9 @@ int main(int argc, char** argv) {
         const auto image =
             rasterize_status_panel(kStatusPanelWidth, kStatusPanelHeight, input, false, false, &used);
         require(image.size() == static_cast<std::size_t>(kStatusPanelWidth) * kStatusPanelHeight, "panel size");
-        // Eight lines: 136 to the first, 22 a line, 8 below the last.
-        require(used == 136 + 8 * 22 + 8, "panel not cut to its lines");
+        // Nine lines including vector quality help: 136 to the first,
+        // 22 a line, 8 below the last.
+        require(used == 136 + 9 * 22 + 8, "panel not cut to its lines");
         const auto used_end = image.begin() + static_cast<std::ptrdiff_t>(used) * kStatusPanelWidth;
         require(std::all_of(used_end, image.end(), [](std::uint32_t pixel) { return pixel == 0; }),
                 "below the panel must be transparent");

@@ -136,6 +136,8 @@ enum class DlssMotionVectorStatus : std::uint32_t {
     // output has the image's shape: an eye image of another size than
     // every DLSS output, say.
     no_matching_output,
+    // Both submitted frames refer to the same DLSS evaluation.
+    stale_guides,
 };
 
 struct DlssMotionVectorStatistics {
@@ -154,6 +156,9 @@ struct DlssMotionVectorStatistics {
     std::uint64_t used{};
     std::uint64_t last_used_publication{};
     DlssMotionVectorStatus status{DlssMotionVectorStatus::waiting_for_dlss};
+    // Latest queue-compatible DLSS output and requested eye image, for a
+    // size-mismatch diagnostic. Internal only; the public getter ABI stays fixed.
+    std::uint32_t dlss_width{}, dlss_height{}, eye_width{}, eye_height{};
 };
 
 void publish_dlss_motion_vectors(

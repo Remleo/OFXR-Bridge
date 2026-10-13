@@ -24,12 +24,14 @@ class D3D12NativeDlssG final {
     // Why the last record() returned S_FALSE.
     enum class Skip {
         none,
-        guides,                  // missing, reset, discontinuous or invalid guides
+        guides,                  // missing or invalid guide resources/metadata
         resizing,                // a resized eye waits for its previous submission
         multi_frame_unsupported, // more outputs than the adapter's feature generates
         feature_unavailable,     // NGX could not create the feature; retried later
         evaluate_failed,         // NGX rejected an evaluation; the history reseeds
         hitch,                   // the pair spans a game hitch; the real frame is shown
+        stale_guides,            // the same DLSS evaluation was seen on both frames
+        temporal_guides,         // a reset or discontinuity in the DLSS history
     };
     D3D12NativeDlssG();
     ~D3D12NativeDlssG();

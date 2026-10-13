@@ -89,11 +89,13 @@ void apply_method(LauncherSettings& settings, Method method) noexcept {
 
 OfxrMode ofxr_mode(const LauncherSettings& settings) noexcept {
     if (settings.extrapolate) return OfxrMode::extrapolate;
+    if (!settings.game_vectors) return OfxrMode::optical_flow_only;
     if (settings.dlss_flow_hybrid) return OfxrMode::hybrid;
     return OfxrMode::interpolate;
 }
 
 void apply_ofxr_mode(LauncherSettings& settings, OfxrMode mode) noexcept {
+    settings.game_vectors = mode != OfxrMode::optical_flow_only;
     settings.dlss_flow_hybrid = mode == OfxrMode::hybrid;
     settings.extrapolate = mode == OfxrMode::extrapolate;
 }
@@ -124,6 +126,7 @@ std::wstring method_name(Method method) {
 
 std::wstring ofxr_mode_name(OfxrMode mode) {
     switch (mode) {
+    case OfxrMode::optical_flow_only: return L"interpolating, optical flow only (DLSS vectors off)";
     case OfxrMode::hybrid: return L"interpolating, DLSS vectors + FidelityFX flow";
     case OfxrMode::extrapolate: return L"extrapolating, SpaceWarp-style";
     case OfxrMode::interpolate:
@@ -176,6 +179,12 @@ ModeCost method_cost(const benchmark::Results& results, const LauncherSettings& 
 
 ModeCost ofxr_mode_cost(const benchmark::Results& results, const LauncherSettings& settings,
                         OfxrMode mode, const CostQuery& query) {
+    if (mode == OfxrMode::optical_flow_only) {
+        auto flow = settings;
+        flow.frame_generation = FrameGeneration::ofxr;
+        apply_ofxr_mode(flow, mode);
+        return method_cost(results, flow, current_method(flow), query);
+    }
     const bool triple = query.triple.value_or(settings.triple_frame_gen);
     ModeCost cost;
     switch (mode) {

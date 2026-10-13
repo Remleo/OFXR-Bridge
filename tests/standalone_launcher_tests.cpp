@@ -23,6 +23,21 @@ int main() {
 
     const LauncherSettings release_defaults;
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    LauncherSettings optical_only;
+    optical_only.game_vectors = false;
+    if (!release_defaults.game_vectors ||
+        parse_settings(serialize_settings(optical_only)).game_vectors ||
+        !contains(build_runtime_ini(optical_only), "motion_vectors=off")) {
+        std::cerr << "optical-only preference did not survive save/rearm\n";
+        return 1;
+    }
+    LauncherSettings adopted_optical;
+    if (!adopt_runtime_ini(adopted_optical, "[ofxr]\nmotion_vectors=off\n") ||
+        adopted_optical.game_vectors || adopt_runtime_ini(adopted_optical, "[ofxr]\nmotion_vectors=off\n") ||
+        !adopt_runtime_ini(adopted_optical, "[ofxr]\nmotion_vectors=dlss\n") || !adopted_optical.game_vectors) {
+        std::cerr << "headset vector preference did not synchronize with tray\n";
+        return 1;
+    }
     if (release_defaults.frame_generation != FrameGeneration::ofxr ||
         !contains(default_runtime_ini, "frame_generation=ofxr")) return 1;
     LauncherSettings native_settings;

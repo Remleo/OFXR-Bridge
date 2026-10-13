@@ -1491,9 +1491,13 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             }
             const auto &ga = *ag->eyes[sl];
             const auto &gb = *bg->eyes[sl];
+            if (ga.serial != 0 && ga.serial == gb.serial &&
+                ga.stream == gb.stream && ga.epoch == gb.epoch) {
+                return skip(Skip::stale_guides);
+            }
             if (gb.reset || !ga.serial || gb.previous_serial != ga.serial ||
-                ga.stream != gb.stream || ga.epoch != gb.epoch) {
-                return skip(Skip::guides);
+                gb.serial <= ga.serial || ga.stream != gb.stream || ga.epoch != gb.epoch) {
+                return skip(Skip::temporal_guides);
             }
             if (ga.depth_inverted != gb.depth_inverted || ga.depth_infinite != gb.depth_infinite ||
                 ga.camera_near != gb.camera_near || ga.camera_far != gb.camera_far) {

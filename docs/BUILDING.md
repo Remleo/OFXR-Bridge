@@ -978,7 +978,7 @@ at its poses' time.
 
 Two more test hooks move the runtime's own devices where it lists
 `XR_EXT_conformance_automation` (the Meta XR Simulator does), so that its
-compositor sees them: `XRFG_TEST_RUNTIME_FLIP_S=<period>` holds the right
+compositor sees them: `XRFG_TEST_RUNTIME_FLIP_S=<period>` holds the left
 controller upside down for the first half of each period, and
 `XRFG_TEST_RUNTIME_HEAD_SWAY_DEG` / `_PERIOD_S` sways the head (records:
 `test_runtime_device`). With the flip, hello_xr on the simulator showed the
@@ -2474,9 +2474,10 @@ per layer of the code, and only the last one touches the game.
   bindings with the grips and the controls, then with the grips alone, then
   as the game made them (record `status_panel` 2, a the tier). The attach
   takes both sets or falls back to the grip set (3, c whether the controls
-  were taken). `layer_sync_actions` adds the controls' set with the hand's
-  subaction only while the overlay reports the panel on that hand
-  (`interactive_hand`), in the exclusive mode without the game's sets, and
+  were taken). `layer_sync_actions` adds the controls' set with the opposite
+  hand's subaction only while the overlay reports the panel visible
+  (`interactive_hand` names the hand editing it), in the exclusive mode
+  without the game's sets, and
   reads the two actions there, where changedSinceLastSync is exact, into
   `panel_input_sample` under `panel_input_mutex`. On the end-frame thread
   `update_panel_cursor` feeds the navigator every frame, moves the cursor

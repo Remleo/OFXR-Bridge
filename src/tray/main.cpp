@@ -100,6 +100,7 @@ enum MenuCommand : UINT {
     ofxr_mode_interpolate = 165,
     ofxr_mode_hybrid = 166,
     ofxr_mode_extrapolate = 167,
+    ofxr_mode_flow_only = 177,
     // 2X and 3X as a pair of choices; each is toggle_triple_frame_gen when
     // it changes anything.
     frames_2x = 168,
@@ -576,6 +577,9 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             tooltip += L" + bidirectional";
         }
         switch (mode) {
+        case sl::OfxrMode::optical_flow_only:
+            tooltip += L" - DLSS vectors off";
+            break;
         case sl::OfxrMode::hybrid:
             tooltip += L" - vectors + FidelityFX flow";
             break;
@@ -878,7 +882,7 @@ void stop_adopted_arms(AppState& state, std::wstring* errors) {
             : s.nvidia_input_scale == NvidiaInputScale::three_quarter ? L"75%" : L"50%");
     };
     const auto mode = [](const LauncherSettings& s) {
-        return std::wstring(s.extrapolate ? L"extrapolate" : s.dlss_flow_hybrid ? L"hybrid" : L"interpolate");
+        return ofxr_mode_name(ofxr_mode(s));
     };
     add(L"Method", method(a), method(b));
     add(L"Per frame", frames(a), frames(b));
@@ -1261,7 +1265,7 @@ void show_context_menu(AppState& state) {
             append_note(methods, L"Run Benchmark this PC to see what each method costs here");
         }
         append_separator(methods);
-        append_note(methods, L"OFXR from optical flow (games without DLSS vectors)");
+        append_note(methods, L"OFXR optical flow engine (fallback or optical flow only)");
         append_entry(methods, method_fidelity_fx, L"FidelityFX optical flow (any graphics card)",
                      method == sl::Method::fidelity_fx, true, true, method_note(sl::Method::fidelity_fx));
         append_entry(methods, method_nvidia_fast, L"NVIDIA optical flow, fast (testing)",
@@ -1286,8 +1290,12 @@ void show_context_menu(AppState& state) {
                      mode == sl::OfxrMode::interpolate, !native, true,
                      mode_note(sl::OfxrMode::interpolate));
         append_entry(methods, ofxr_mode_hybrid,
-                     L"Interpolate, DLSS vectors + FidelityFX flow (best quality, default)",
+                     L"Interpolate, DLSS vectors + FidelityFX flow (default)",
                      mode == sl::OfxrMode::hybrid, !native, true, mode_note(sl::OfxrMode::hybrid));
+        append_entry(methods, ofxr_mode_flow_only,
+                     L"Interpolate, optical flow only (try if DLSS vectors cause artifacts)",
+                     mode == sl::OfxrMode::optical_flow_only, !native, true,
+                     mode_note(sl::OfxrMode::optical_flow_only));
         const std::wstring extrapolation = mode_note(sl::OfxrMode::extrapolate);
         append_entry(methods, ofxr_mode_extrapolate,
                      L"Extrapolate, SpaceWarp-style (lowest latency)",
@@ -1777,9 +1785,11 @@ void handle_command(AppState& state, UINT command) {
     }
     case ofxr_mode_interpolate:
     case ofxr_mode_hybrid:
+    case ofxr_mode_flow_only:
     case ofxr_mode_extrapolate: {
         namespace sl = xrfg::standalone;
         const auto mode = command == ofxr_mode_hybrid ? sl::OfxrMode::hybrid
+            : command == ofxr_mode_flow_only ? sl::OfxrMode::optical_flow_only
             : command == ofxr_mode_extrapolate ? sl::OfxrMode::extrapolate
             : sl::OfxrMode::interpolate;
         sl::apply_ofxr_mode(state.settings, mode);
@@ -1789,12 +1799,17 @@ void handle_command(AppState& state, UINT command) {
         show_balloon(
             state,
             mode == sl::OfxrMode::extrapolate ? L"OFXR: extrapolate"
+            : mode == sl::OfxrMode::optical_flow_only ? L"OFXR: optical flow only"
             : mode == sl::OfxrMode::hybrid ? L"OFXR: vectors + FidelityFX flow"
                                            : L"OFXR: interpolate",
             mode == sl::OfxrMode::extrapolate
                 ? L"Each real frame is shown at once and the next predicted from it: a display "
                   L"frame less latency, but predictions err more. Uses FidelityFX flow without "
                   L"DLSS vectors; Prefer FPS over latency is off. From the next game start."
+            : mode == sl::OfxrMode::optical_flow_only
+                ? L"Uses the selected optical flow engine with DLSS vectors off. Try this when "
+                  L"a game's or VR mod's vectors cause ghosting or camera-turn artifacts. "
+                  L"No FoV changes needed. From the next game start; the headset Mode row can switch live."
             : mode == sl::OfxrMode::hybrid
                 ? L"In games with DLSS, FidelityFX flow runs beside the game's vectors and each "
                   L"pixel takes the better: the least error measured, for about 1 ms more. "

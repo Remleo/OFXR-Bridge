@@ -3261,6 +3261,18 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     require(xrfg::dlss_motion_vector_statistics().status ==
                 xrfg::DlssMotionVectorStatus::no_matching_output,
         "an image no DLSS output fits was reported as DLSS on another queue");
+    xrfg::report_dlss_motion_vector_status(xrfg::DlssMotionVectorStatus::waiting_for_dlss);
+    const auto mismatch = xrfg::dlss_motion_vector_statistics();
+    require(mismatch.status == xrfg::DlssMotionVectorStatus::no_matching_output &&
+            mismatch.dlss_width == width && mismatch.dlss_height == height &&
+            mismatch.eye_width == width / 2 && mismatch.eye_height == height / 2,
+        "synthesis erased the size mismatch or its resolution diagnostic");
+    xrfg::report_dlss_motion_vector_status(xrfg::DlssMotionVectorStatus::stale_guides);
+    const auto stale = xrfg::dlss_motion_vector_statistics();
+    require(stale.status == xrfg::DlssMotionVectorStatus::stale_guides &&
+            stale.temporal_rejections == mismatch.temporal_rejections + 1 &&
+            stale.invalid_rejections == mismatch.invalid_rejections,
+        "stopped DLSS evaluations were counted as invalid guide data");
     xrfg::report_dlss_motion_vector_use();
     const auto used = xrfg::dlss_motion_vector_statistics();
     require(used.status == xrfg::DlssMotionVectorStatus::used && used.used == 1 &&
@@ -3339,6 +3351,13 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
             alternating_cd->eyes[0]->previous_serial == 1 &&
             alternating_cd->eyes[1]->previous_serial == 2,
         "single alternating DLSS stream lost per-eye temporal continuity");
+    require(alternating_cd->eyes[0]->bridge && alternating_cd->eyes[1]->bridge &&
+            alternating_cd->eyes[0]->bridge->serial == 2 &&
+            alternating_cd->eyes[1]->bridge->serial == 3 &&
+            alternating_cd->eyes[0]->bridge->previous_serial == 1 &&
+            alternating_cd->eyes[1]->bridge->previous_serial == 2 &&
+            !alternating_cd->eyes[0]->bridge->bridge && !alternating_cd->eyes[1]->bridge->bridge,
+        "array stereo discarded the raw intervening evaluation needed to correct cross-eye motion");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(101);
     xrfg::retire_dlss_motion_vector_stream(202);

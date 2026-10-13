@@ -584,7 +584,7 @@ struct Dispatch {
         std::array<XrPath, 2> grips{XR_NULL_PATH, XR_NULL_PATH};
         // The panel's controls (`[overlay] panel_input`): a second set, at a
         // priority above any a game is likely to use, so that on a runtime
-        // that honours priorities the flipped hand's stick and trigger reach
+        // that honours priorities the opposite hand's stick and trigger reach
         // the panel alone while it is up. It is synced with that hand's
         // subaction only then, and with no hand the game's input is as
         // before. A runtime or profile that refuses it costs the controls
@@ -603,7 +603,7 @@ struct Dispatch {
         // What an unknown profile is tried with.
         ProfileBindings guess;
         // While the panel is up, every game action set reads inactive: the
-        // only way to keep the game from the flipped hand's stick on a
+        // only way to keep the game from the editing hand's stick on a
         // runtime that ignores priorities. Off by default.
         bool exclusive{};
     } panel_gesture;
@@ -893,8 +893,8 @@ struct SessionState {
     // xrSyncActions then follows.
     std::array<XrSpace, 2> panel_grip_spaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
     std::atomic<bool> panel_actions_attached{false};
-    // The panel's controls: whether their set was attached, the hand the
-    // panel sits on (-1 none; the xrSyncActions thread reads it, the
+    // The panel's controls: whether their set was attached, the editing hand
+    // opposite the panel (-1 none; the xrSyncActions thread reads it, the
     // end-frame thread writes it), the last inputs read on the sync thread,
     // and the cursor the end-frame thread moves through the editables it
     // cached at the last repaint.
@@ -1969,7 +1969,7 @@ template <typename Call>
 // sin(2 pi t / period) at each runtime frame's predicted display time, as
 // the runtime's xrWaitFrame returns it (so it moves every displayed frame, as
 // a head does, and the frame's reprojection_angle sees where it is then), and
-// XRFG_TEST_RUNTIME_FLIP_S=<period> holds the right controller
+// XRFG_TEST_RUNTIME_FLIP_S=<period> holds the left controller
 // upside down for the first half of each period and upright for the second.
 // With the flip, XRFG_TEST_RUNTIME_PANEL_ROW=<row> works the panel's
 // controls once, a second into the first flip: the right thumbstick pushed
@@ -2021,9 +2021,9 @@ struct TestRuntimeDeviceSession {
     bool started{}, failed{};
     XrPosef base{};
     XrTime first{};
-    XrPath head{}, head_input{}, right{}, right_grip{};
+    XrPath head{}, head_input{}, left{}, left_grip{}, right{};
     XrPath right_thumbstick{}, right_trigger{};
-    bool head_found{}, head_failed{}, right_active{};
+    bool head_found{}, head_failed{}, controllers_active{};
     std::size_t head_candidate{};
     int head_tries{};
     int flipped{-1};
@@ -2068,9 +2068,10 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
             info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
             const bool view = local && XR_SUCCEEDED(d.create_reference_space(state.handle, &info, &s.view));
             if (!view || XR_FAILED(d.test_string_to_path(d.test_instance, "/user/head", &s.head)) ||
+                XR_FAILED(d.test_string_to_path(d.test_instance, "/user/hand/left", &s.left)) ||
                 XR_FAILED(d.test_string_to_path(d.test_instance, "/user/hand/right", &s.right)) ||
-                XR_FAILED(d.test_string_to_path(d.test_instance, "/user/hand/right/input/grip/pose",
-                                                &s.right_grip)) ||
+                XR_FAILED(d.test_string_to_path(d.test_instance, "/user/hand/left/input/grip/pose",
+                                                &s.left_grip)) ||
                 !locate_head(display_time, &s.base)) {
                 s.failed = true;
                 event(-1, 0, 0, 0);
@@ -2141,16 +2142,19 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
             }
         }
         if (wanted.flip_period_ns > 0.0) {
-            if (!s.right_active && d.test_set_input_device_active != nullptr) {
-                s.right_active = true;
+            if (!s.controllers_active && d.test_set_input_device_active != nullptr) {
+                s.controllers_active = true;
                 constexpr std::array<const char*, 2> kProfiles{
                     "/interaction_profiles/meta/touch_controller_plus",
                     "/interaction_profiles/oculus/touch_controller"};
                 for (std::size_t index = 0; index < kProfiles.size(); ++index) {
                     XrPath profile = XR_NULL_PATH;
                     if (XR_FAILED(d.test_string_to_path(d.test_instance, kProfiles[index], &profile))) continue;
-                    const XrResult result =
+                    const XrResult left_result =
+                        d.test_set_input_device_active(state.handle, profile, s.left, XR_TRUE);
+                    const XrResult right_result =
                         d.test_set_input_device_active(state.handle, profile, s.right, XR_TRUE);
+                    const XrResult result = XR_FAILED(left_result) ? left_result : right_result;
                     event(result, 2, index, 0);
                     if (XR_SUCCEEDED(result)) break;
                 }
@@ -2158,15 +2162,15 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
             const double since = static_cast<double>(display_time - s.first);
             const int flipped = std::fmod(since, wanted.flip_period_ns) < wanted.flip_period_ns * 0.5 ? 1 : 0;
             XrPosef pose{};
-            // In front of the head, low and to the right, its grip's up axis
+            // In front of the head, low and to the left, its grip's up axis
             // pointing down when turned over: half a turn about its forward
             // axis.
-            pose.position = {s.base.position.x + 0.2F, s.base.position.y - 0.3F,
+            pose.position = {s.base.position.x - 0.2F, s.base.position.y - 0.3F,
                              s.base.position.z - 0.35F};
             pose.orientation = flipped ? XrQuaternionf{0.0F, 0.0F, 1.0F, 0.0F}
                                        : XrQuaternionf{0.0F, 0.0F, 0.0F, 1.0F};
             const XrResult result = d.test_set_input_device_location(
-                state.handle, s.right, s.right_grip, s.local, pose);
+                state.handle, s.left, s.left_grip, s.local, pose);
             if (flipped != s.flipped) {
                 s.flipped = flipped;
                 event(result, 3, static_cast<std::uint64_t>(flipped), 0);
@@ -5389,7 +5393,7 @@ XrResult layer_get_instance_proc_addr_impl(
 // application suggests its bindings and attaches its action sets once, before
 // its first frame. The overlay follows the setting live after that.
 // `[overlay] panel_input`: hand (the default) edits the panel with the
-// flipped hand's stick and trigger, exclusive also keeps the game's action
+// opposite hand's stick and trigger, exclusive also keeps the game's action
 // sets out of xrSyncActions while the panel is up, off binds nothing.
 enum class PanelInputMode { off, hand, exclusive };
 [[nodiscard]] PanelInputMode read_panel_input_mode() noexcept {
@@ -14340,6 +14344,8 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::used) ==
               static_cast<int>(xrfg::DlssMotionVectorStatus::used));
 static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
               static_cast<int>(xrfg::DlssMotionVectorStatus::no_matching_output));
+static_assert(static_cast<int>(xrfg::PanelVectorStatus::stale_guides) ==
+              static_cast<int>(xrfg::DlssMotionVectorStatus::stale_guides));
 
 [[nodiscard]] int panel_scale_percent(int scale) noexcept {
     switch (scale) {
@@ -14410,6 +14416,8 @@ void apply_panel_change(const std::shared_ptr<SessionState>& state, const xrfg::
             const bool was_extrapolating = state->extrapolate;
             ok = embedded::set_runtime_key(L"dlss_flow_hybrid", change.choice == 1 ? L"1" : L"0") &&
                  embedded::set_runtime_key(L"extrapolate", change.choice == 2 ? L"1" : L"0");
+            settings.motion_vectors = change.choice == 3 ? 0 : 1;
+            ok = embedded::request(settings) && ok;
             // The hybrid is re-read at a control change; extrapolation shapes
             // the session.
             embedded::bump_revision();
@@ -14434,8 +14442,8 @@ void apply_panel_change(const std::shared_ptr<SessionState>& state, const xrfg::
     }
 }
 
-// The panel's controls, on the application's end-frame thread: the hand the
-// panel sits on goes to the sync thread, the inputs it read come back, and
+// The panel's controls, on the application's end-frame thread: the hand
+// opposite the panel goes to the sync thread, the inputs it read come back, and
 // a command moves the cursor or applies a change. The cursor goes with the
 // panel that showed it.
 void update_panel_cursor(
@@ -14631,6 +14639,10 @@ void update_panel_cursor(
     auto& vectors = input.vectors;
     vectors.status = static_cast<xrfg::PanelVectorStatus>(statistics.status);
     vectors.published = statistics.published;
+    vectors.dlss_width = statistics.dlss_width;
+    vectors.dlss_height = statistics.dlss_height;
+    vectors.eye_width = statistics.eye_width;
+    vectors.eye_height = statistics.eye_height;
     if (now - state->panel_vectors_at < std::chrono::seconds(1)) {
         const auto since = [](std::uint64_t value, std::uint64_t before) {
             return value > before ? value - before : 0;
@@ -16450,7 +16462,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_sync_actions(
             (sync_info->countActiveActionSets != 0 && sync_info->activeActionSets == nullptr)) {
             return gesture.sync_actions(session, sync_info);
         }
-        // The panel's controls go in with the hand the panel sits on, and
+        // The panel's controls go in with the hand opposite the panel, and
         // only then; in the exclusive mode the game's sets stay out while
         // the panel is up.
         const int hand = state->panel_input_attached.load(std::memory_order_acquire)

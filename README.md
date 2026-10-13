@@ -1274,7 +1274,7 @@ Then a line each:
 | **Asked** | The method the tray is set to, with 2X or 3X and "deep" for Prefer FPS over latency. |
 | **Running** | What the session runs now, after every fallback. For example, the DLSS vectors + FidelityFX hybrid runs the chosen optical flow until the game has given its first DLSS vectors, and the flow on its own in a game without DLSS. |
 | **Why** | One line per reason, if there is any. Amber and red ones are fallbacks: no DLSS vectors from the game, vectors that did not match the frames, NVIDIA optical flow not available on this GPU, DLSS Frame Generation not available or waiting for the game's depth, 3X or the deep pipeline refused by the runtime's swapchain limit, a short hold after a change, eye images that could not be set up. Grey ones are not: the tray's method, the hybrid and extrapolation take effect when the game next starts, so a change made during the game shows here as "starts with the next game start", and 3X switches within a moment. |
-| **Vectors** (OFXR) or **Guides** (DLSS Frame Generation) | The share of the last quarter second's frame pairs that used the game's DLSS vectors, or why none did: none from this game yet, refused because they did not match the frames, no DLSS output the eye images' size (an eye image the game's DLSS never writes, such as a swapchain per eye of another size), waiting for the game's depth. With DLSS Frame Generation, also the share of pairs on which NGX's history was reset and reseeded with the aligned previous frame: every pair while the head turns, which is where native generation is at its softest. |
+| **Vectors** (OFXR) or **Guides** (DLSS Frame Generation) | The share of the last quarter second's checked pairs that accepted the game's DLSS vectors, or why none did: none from this game yet, refused because they did not match the frames, no DLSS output the eye images' size (an eye image the game's DLSS never writes, such as a swapchain per eye of another size), waiting for the game's depth. With DLSS Frame Generation, also the share of pairs on which NGX's history was reset and reseeded with the aligned previous frame: every pair while the head turns, which is where native generation is at its softest. |
 | **Pipeline** | Deep or shallow, and whether the bridge's own presenter thread hands the frames to the runtime or the game's thread does. |
 | **Latency** | The display frames frame generation adds, in milliseconds at the refresh rate: interpolation shows each real frame a frame later (two at 3X), the deep pipeline one more, extrapolation none. A DLSS Frame Generation pair NGX skips is held as long, so the line counts while the pairs go out even when nothing is generated. "promise +1" means the game is told its frames are shown a frame later than planned, because that is when they go out. |
 | **GPU** | Frame generation's GPU time for each pair of frames, averaged over about a second. It is measured only while the flight recorder is on. |
@@ -1282,13 +1282,39 @@ Then a line each:
 | **Pace** | Shown when the game runs under what 2X or 3X needs at the display's refresh rate (by more than a tenth): frames then repeat unevenly, which reads as judder or doubling whatever the generated frames look like. It names what to try, 3X or a lower refresh rate; a GPU whose DLSS Frame Generation makes one frame gets the refresh rate alone. |
 | **Session** | The game's graphics API, through which of the bridge's paths, and the OpenXR runtime. |
 
+### When DLSS vectors are unavailable or look wrong
+
+The panel distinguishes **no new DLSS frame data** from invalid guides and
+broken frame history. Menus and loading screens can stop DLSS evaluations;
+check during gameplay before changing settings. A size mismatch includes the
+latest DLSS output size and the requested eye-image size.
+
+**Accepted on 100% of checked pairs** reports use, not visual correctness.
+A VR mod can supply vectors with the wrong eye history or motion scale even
+when their dimensions match. Do not force a match by shrinking the normal
+FoV. For artifacts, select **Method: OFXR**, then **Mode: optical flow only**
+in the headset, or the corresponding entry under **Frame generation method**
+in the tray. This disables game-vector capture for OFXR and uses the selected
+optical flow engine. Native DLSS Frame Generation still requires game guides.
+Switching back to interpolate or hybrid enables the vectors again.
+
+The headset can switch interpolation modes live. Entering or leaving
+extrapolation still needs a game restart. The choice is saved and synchronized
+with the tray. A fix also preserves the intermediate raw DLSS evaluation for
+alternating-eye array swapchains, allowing the existing cross-eye correction
+to run there. That correction is conditional; the reported Control artifacts
+still need a game capture to confirm their cause and the visual result.
+
 ### Changing settings from the panel
 
-While the panel is up on a controller, that controller's thumbstick and
-trigger edit it. Below the status lines the panel lists the settings: how
+While the panel is up on a controller, the other controller's thumbstick and
+trigger edit it: turn the left controller upside down, then use the right
+stick to select options and the right trigger to apply them. Turning the
+right controller over instead uses the left controller's controls.
+Below the status lines the panel lists the settings: how
 many frames a game frame makes (2X, 3X or automatic), the method, DLSS Frame
 Generation's resolution and camera motion, OFXR's flow and its scale, both
-ways, its mode (interpolate, the hybrid, extrapolate), the pipeline, and
+ways, its mode (interpolate, the hybrid, extrapolate, optical flow only), the pipeline, and
 pause. Push the stick once to bring up the cursor, up and down to move it,
 left and right to step the highlighted setting to the next choice, which is
 shown beside the current one, and hold the trigger for half a second to
@@ -1307,7 +1333,7 @@ two seconds, so its menu agrees and the change survives the next game
 start and the tray's own rewrites of the layer's ini.
 
 The controls are bound in an action set of their own, at a priority above
-a game's, for the hand the panel is on and only while it is up. On a
+a game's, for the hand opposite the panel and only while it is up. On a
 runtime that honours priorities the game does not see that hand's stick
 and trigger meanwhile; on one that does not, the game may react as well
 (a snap turn on the stick, say). `[overlay] panel_input=exclusive` keeps

@@ -546,7 +546,7 @@ struct OpenXrFpsOverlay::Impl {
             }
             publish_panel_due();
             const int hand = gesture.hand();
-            interactive_hand.store(shown ? hand : -1, std::memory_order_relaxed);
+            interactive_hand.store(gesture.input_hand(), std::memory_order_relaxed);
             // Its pose is the controller's now, not where it was turned over:
             // through the hide delay too, which is what lets it follow the
             // hand down as it comes back up.

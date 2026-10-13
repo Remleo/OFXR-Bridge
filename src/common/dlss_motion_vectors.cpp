@@ -532,6 +532,17 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // for its size: what tells an image no evaluation fits from a game
         // whose DLSS ran on another queue.
         const std::size_t streams_on_queue = candidates.size();
+        state.statistics.eye_width = static_cast<std::uint32_t>(description.Width);
+        state.statistics.eye_height = description.Height;
+        state.statistics.dlss_width = state.statistics.dlss_height = 0;
+        if (!candidates.empty()) {
+            const auto newest = std::max_element(candidates.begin(), candidates.end(),
+                [](const Candidate& a, const Candidate& b) {
+                    return a.frame->publication < b.frame->publication;
+                });
+            state.statistics.dlss_width = newest->frame->output_width;
+            state.statistics.dlss_height = newest->frame->output_height;
+        }
 
         // An evaluation whose output is this very image belongs to it,
         // whatever else matches its size.
@@ -715,6 +726,15 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 same_identity(previous->producer_queue.Get(), consumer_queue)) {
                 auto left = std::make_shared<DlssMotionVectorFrame>(*previous);
                 auto right = std::make_shared<DlssMotionVectorFrame>(*current);
+                // Keep the intervening raw evaluation, just as the separate
+                // eye-swapchain path does. The composer can then recognize and
+                // correct cross-eye history instead of merely relabelling it.
+                const auto& older = candidates.front().older;
+                if (older && older->stream == previous->stream &&
+                    older->epoch == previous->epoch && older->serial + 1 == previous->serial) {
+                    left->bridge = older;
+                }
+                right->bridge = previous;
                 // The first of the pair is the left eye unless the inputs
                 // say otherwise.
                 if (input_offset(*right) < input_offset(*left)) std::swap(left, right);
@@ -779,7 +799,14 @@ void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept {
     try {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
-        if (status == DlssMotionVectorStatus::temporal_mismatch) {
+        // A missing set at synthesis must not erase the resolver's specific
+        // explanation of why it could not match a DLSS output to this image.
+        if (status == DlssMotionVectorStatus::waiting_for_dlss &&
+            (state.statistics.status == DlssMotionVectorStatus::no_matching_output ||
+             state.statistics.status == DlssMotionVectorStatus::queue_mismatch ||
+             state.statistics.status == DlssMotionVectorStatus::output_not_direct)) return;
+        if (status == DlssMotionVectorStatus::temporal_mismatch ||
+            status == DlssMotionVectorStatus::stale_guides) {
             ++state.statistics.temporal_rejections;
         } else if (status == DlssMotionVectorStatus::invalid_input) {
             ++state.statistics.invalid_rejections;

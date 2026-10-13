@@ -212,6 +212,8 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "motion_vectors") {
+                    settings.game_vectors = lower_ascii(value) != "off";
                 } else if (key == "dlss_hybrid") {
                     // Not dlss_flow_hybrid: while the hybrid was off by
                     // default every save wrote dlss_flow_hybrid=0, so that
@@ -308,6 +310,8 @@ bool adopt_runtime_ini(LauncherSettings& settings, std::string_view text) {
                         : value == "50" ? NvidiaInputScale::half : NvidiaInputScale::full;
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = on;
+                } else if (key == "motion_vectors") {
+                    settings.game_vectors = lower_ascii(value) != "off";
                 } else if (key == "dlss_flow_hybrid") {
                     settings.dlss_flow_hybrid = on;
                 } else if (key == "extrapolate") {
@@ -328,6 +332,7 @@ bool adopt_runtime_ini(LauncherSettings& settings, std::string_view text) {
         settings.native_camera != before.native_camera || settings.backend != before.backend ||
         settings.nvidia_preset != before.nvidia_preset || settings.nvidia_input_scale != before.nvidia_input_scale ||
         settings.nvidia_bidirectional != before.nvidia_bidirectional ||
+        settings.game_vectors != before.game_vectors ||
         settings.dlss_flow_hybrid != before.dlss_flow_hybrid || settings.extrapolate != before.extrapolate ||
         settings.deep_pipeline != before.deep_pipeline || settings.triple_frame_gen != before.triple_frame_gen ||
         settings.frames_auto != before.frames_auto;
@@ -344,6 +349,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            nvidia_input_scale_ini_value(settings.nvidia_input_scale) +
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
+           "\r\nmotion_vectors=" + (settings.game_vectors ? "dlss" : "off") +
            "\r\ndlss_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
            "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
@@ -581,7 +587,7 @@ std::string build_runtime_ini(
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
            "\r\ndlssg_camera=" + (settings.native_camera ? "1" : "0") +
-           "\r\nmotion_vectors=dlss" +
+           "\r\nmotion_vectors=" + (settings.game_vectors ? "dlss" : "off") +
            "\r\ndlss_flow_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
            "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +
            "\r\nnvidia_preset=" +

@@ -145,7 +145,7 @@ enum class Engine {
 [[nodiscard]] Engine running_engine(const StatusPanelInput& input) noexcept {
     const PanelMethod& method = input.running;
     if (!input.rates.generating) return Engine::none;
-    const bool used = vectors_in_use(input.vectors);
+    const bool used = (method.native || method.game_vectors) && vectors_in_use(input.vectors);
     // A native pair NGX skipped still goes out, as a copy of the real frame:
     // only a pair that used the guides was generated.
     if (method.native) return used ? Engine::native : Engine::none;
@@ -208,7 +208,8 @@ enum class Engine {
     case PanelVectorStatus::disabled: return "off";
     case PanelVectorStatus::output_not_direct: return "unused: DLSS output is not the eye image";
     case PanelVectorStatus::queue_mismatch: return "unused: DLSS ran on another queue";
-    case PanelVectorStatus::invalid_input: return "refused: invalid";
+    case PanelVectorStatus::invalid_input: return "refused: unsupported guide data";
+    case PanelVectorStatus::stale_guides: return "no new DLSS frame data";
     case PanelVectorStatus::temporal_mismatch: return "refused: they did not match the frames";
     case PanelVectorStatus::used: return "in use";
     case PanelVectorStatus::waiting_for_depth: return "waiting for the game's depth";
@@ -224,6 +225,7 @@ enum class Engine {
 [[nodiscard]] std::string vector_fallback(const StatusPanelInput& input) {
     if (input.vectors.published == 0) return "No DLSS vectors from this game";
     switch (input.vectors.status) {
+    case PanelVectorStatus::stale_guides: return "DLSS has not supplied a new frame";
     case PanelVectorStatus::temporal_mismatch: return "The game's DLSS vectors did not match the frames";
     case PanelVectorStatus::invalid_input: return "The game's DLSS vectors were refused as invalid";
     case PanelVectorStatus::output_not_direct: return "DLSS vectors unused: DLSS output is not the eye image";
@@ -336,9 +338,10 @@ std::vector<PanelEditable> panel_editables(const StatusPanelInput& input) {
             rows.push_back({PanelSetting::both_ways, "Both ways", {"off", "on"}, asked.both_ways ? 1 : 0});
         }
         // The hybrid follows at once; extrapolation shapes the session.
-        rows.push_back({PanelSetting::ofxr_mode, "Mode", {"interpolate", "hybrid", "extrapolate"},
-                        asked.extrapolate != 0 ? 2 : asked.hybrid ? 1 : 0, true, true,
-                        asked.extrapolate != 0 ? "" : ""});
+        rows.push_back({PanelSetting::ofxr_mode, "Mode",
+                        {"interpolate", "hybrid", "extrapolate", "optical flow only"},
+                        asked.extrapolate != 0 ? 2 : !asked.game_vectors ? 3 : asked.hybrid ? 1 : 0,
+                        true, true, "Artifacts? Try optical flow only"});
     }
     rows.push_back({PanelSetting::pipeline, "Buffering", {"deep", "shallow"}, asked.deep ? 0 : 1, false, true,
                     "from the next game start"});
@@ -505,6 +508,9 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
                 case PanelVectorStatus::invalid_input:
                     reason("The game's DLSS guides were refused as invalid", PanelTone::warn);
                     break;
+                case PanelVectorStatus::stale_guides:
+                    reason("DLSS has not supplied a new frame", PanelTone::warn);
+                    break;
                 // Guides the game gives but that cannot be used, which this
                 // line once called still awaited.
                 case PanelVectorStatus::temporal_mismatch:
@@ -610,7 +616,7 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
         if (vectors.used > 0) {
             const double share = static_cast<double>(vectors.used) /
                 static_cast<double>(vectors.used + refused);
-            line.text = "used on " + format("%.0f", share * 100.0) + "% of pairs";
+            line.text = "accepted on " + format("%.0f", share * 100.0) + "% of checked pairs";
             if (refused > 0) line.text += ", " + std::to_string(refused) + " refused";
             if (set.native && vectors.native_resets > 0) {
                 const double reset = std::min(1.0, static_cast<double>(vectors.native_resets) /
@@ -625,6 +631,39 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
                                           : PanelTone::dim;
         }
         lines.push_back(std::move(line));
+        // Acceptance proves matching resources/history, not that a VR mod's
+        // motion field describes the displayed eye correctly.
+        std::string help;
+        switch (vectors.status) {
+        case PanelVectorStatus::stale_guides:
+            help = "Menus/loading can pause DLSS; recheck in gameplay";
+            break;
+        case PanelVectorStatus::waiting_for_dlss:
+            if (vectors.published == 0) help = "Enable in-game DLSS, or use OFXR optical flow only";
+            break;
+        case PanelVectorStatus::no_matching_output:
+            if (vectors.dlss_width && vectors.eye_width) {
+                lines.push_back({"Sizes", "Latest DLSS " + std::to_string(vectors.dlss_width) + "x" +
+                    std::to_string(vectors.dlss_height) + "; eye image " +
+                    std::to_string(vectors.eye_width) + "x" + std::to_string(vectors.eye_height), PanelTone::dim});
+            }
+            help = "Keep normal FoV; try OFXR optical flow only";
+            break;
+        case PanelVectorStatus::used:
+            help = "Artifacts despite acceptance? Try optical flow only";
+            break;
+        case PanelVectorStatus::temporal_mismatch:
+            help = "History reset/skipped frames; try optical flow only";
+            break;
+        case PanelVectorStatus::invalid_input:
+        case PanelVectorStatus::queue_mismatch:
+        case PanelVectorStatus::output_not_direct:
+        case PanelVectorStatus::waiting_for_depth:
+            help = "Try Method: OFXR, then Mode: optical flow only";
+            break;
+        default: break;
+        }
+        if (!help.empty()) lines.push_back({"Help", std::move(help), PanelTone::dim});
     }
     lines.push_back({"Pipeline",
                      std::string(running.deep ? "deep" : "shallow") +
@@ -697,13 +736,13 @@ StatusPanelText status_panel_text(const StatusPanelInput& input, const PanelCurs
         }
         lines.push_back({"Session", std::move(session), PanelTone::dim});
     }
-    // The settings, for the controls on the controller the panel sits on.
+    // The settings, for the controls on the controller opposite the panel.
     if (input.controls_bound) {
         const auto editables = panel_editables(input);
         const bool shown = cursor != nullptr && cursor->row >= 0;
         lines.push_back({"Settings",
-                         shown ? "stick: choose and change, trigger: apply"
-                               : "turn the stick to choose a setting",
+                         shown ? "other hand: stick chooses, trigger applies"
+                               : "use the other hand's stick to choose",
                          PanelTone::dim});
         for (std::size_t index = 0; index < editables.size(); ++index) {
             const PanelEditable& row = editables[index];

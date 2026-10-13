@@ -225,13 +225,16 @@ void tray_lookups() {
                 native.backend == FlowBackend::fidelity_fx,
             "a flow method leaves native generation");
     require(ofxr_mode(settings) == OfxrMode::hybrid, "the hybrid by default");
-    for (const auto mode : {OfxrMode::interpolate, OfxrMode::hybrid, OfxrMode::extrapolate}) {
+    for (const auto mode : {OfxrMode::interpolate, OfxrMode::hybrid, OfxrMode::extrapolate, OfxrMode::optical_flow_only}) {
         LauncherSettings changed;
         apply_ofxr_mode(changed, mode);
         require(ofxr_mode(changed) == mode && !(changed.dlss_flow_hybrid && changed.extrapolate),
                 "one OFXR mode at a time");
         require(mode_forces_fidelity_fx(mode) == (mode == OfxrMode::extrapolate),
                 "extrapolation takes FidelityFX, the hybrid only with DLSS vectors");
+        require(changed.game_vectors == (mode != OfxrMode::optical_flow_only), "optical-only disables game vectors");
+        apply_ofxr_mode(changed, OfxrMode::hybrid);
+        require(changed.game_vectors, "switching back to hybrid restores vector capture");
     }
     LauncherSettings both;
     both.dlss_flow_hybrid = both.extrapolate = true;
@@ -263,6 +266,9 @@ void tray_lookups() {
     require(near(method_cost(results, settings, Method::fidelity_fx).cost_ms, 0.6),
             "bidirectional does not apply to FidelityFX");
     settings.nvidia_bidirectional = false;
+    require(near(ofxr_mode_cost(results, settings, OfxrMode::optical_flow_only).cost_ms, 2.9) &&
+                near(ofxr_mode_cost(results, settings, OfxrMode::optical_flow_only, {.triple = true}).cost_ms, 3.2),
+            "optical-only uses selected flow cost without guide copies or duplicate 3X overhead");
     require(near(method_cost(results, settings, Method::fidelity_fx, {.input_scale = 100}).cost_ms, 1.3),
             "a submenu entry asks about another scale");
     require(method_cost(results, settings, Method::nvidia_slow).status == CaseStatus::unavailable &&

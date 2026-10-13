@@ -48,6 +48,9 @@ struct LauncherSettings {
     NvidiaPerformancePreset nvidia_preset{NvidiaPerformancePreset::medium};
     NvidiaInputScale nvidia_input_scale{NvidiaInputScale::half};
     bool nvidia_bidirectional{};
+    // Off uses optical flow alone, for games/mods whose DLSS vectors produce
+    // artifacts. Native DLSS FG still requires guides regardless of this.
+    bool game_vectors{true};
     // How OFXR makes frames; the layer's dlss_flow_hybrid and extrapolate,
     // read at session start. Both off: interpolation, from the game's DLSS
     // vectors where it has them and the chosen optical flow where it does

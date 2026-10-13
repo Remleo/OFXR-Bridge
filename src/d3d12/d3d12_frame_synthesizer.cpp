@@ -3067,7 +3067,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto& current = current_source.motion_vectors;
         if (!previous_vectors || !current || previous_vectors->eye_count == 0 ||
             previous_vectors->eye_count != current->eye_count ||
-            current->eye_count != image_description.DepthOrArraySize ||
+            !game_motion_eyes_match(current->eye_count, current_source.view_count) ||
             current->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -4191,6 +4191,12 @@ struct D3D12FrameSynthesizer::Impl {
                 case D3D12NativeDlssG::Skip::resizing:
                 case D3D12NativeDlssG::Skip::hitch:
                     break;
+                case D3D12NativeDlssG::Skip::stale_guides:
+                    report_dlss_motion_vector_status(DlssMotionVectorStatus::stale_guides);
+                    break;
+                case D3D12NativeDlssG::Skip::temporal_guides:
+                    report_dlss_motion_vector_status(DlssMotionVectorStatus::temporal_mismatch);
+                    break;
                 case D3D12NativeDlssG::Skip::multi_frame_unsupported:
                     report_dlss_motion_vector_status(DlssMotionVectorStatus::multi_frame_unsupported);
                     break;
@@ -4254,7 +4260,8 @@ struct D3D12FrameSynthesizer::Impl {
             report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
         } else if (!hybrid && current_source.motion_vectors) {
             // The hybrid uses the pair below and reports it there.
-            report_dlss_motion_vector_status(DlssMotionVectorStatus::temporal_mismatch);
+            report_dlss_motion_vector_status(unchanged_game_motion_pair(previous_source, current_source)
+                ? DlssMotionVectorStatus::stale_guides : DlssMotionVectorStatus::temporal_mismatch);
         }
         if (backend == D3D12OpticalFlowBackend::nvidia) {
             return record_nvidia_pair(

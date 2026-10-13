@@ -32,8 +32,8 @@ public:
     void application_frame(const XrFrameEndInfo* info,
                            const StatusPanelInput* status = nullptr,
                            const PanelCursor* cursor = nullptr) noexcept;
-    // The hand the panel sits on while it is shown by the gesture (0 left, 1
-    // right), else -1: the hand whose controls edit it. Any thread.
+    // The hand whose controls edit the panel (0 left, 1 right), opposite the
+    // controller it sits on while shown by the gesture, else -1. Any thread.
     [[nodiscard]] int interactive_hand() const noexcept;
     // Counts the panel's appearances and disappearances, so a cursor can be
     // dropped with the panel that showed it. Any thread.

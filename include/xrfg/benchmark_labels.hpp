@@ -34,8 +34,10 @@ void apply_method(LauncherSettings& settings, Method method) noexcept;
 // - extrapolate: each real frame shown at once and the next predicted from
 //   it, SpaceWarp-style, from the game's vectors or else FidelityFX flow;
 //   the layer runs FidelityFX and turns the deeper pipeline off.
+// - optical_flow_only: interpolate with the selected flow engine, ignoring
+//   the game's DLSS vectors even when they are available.
 // Extrapolation wins when both flags are set, as in the layer.
-enum class OfxrMode { interpolate, hybrid, extrapolate };
+enum class OfxrMode { interpolate, hybrid, extrapolate, optical_flow_only };
 [[nodiscard]] OfxrMode ofxr_mode(const LauncherSettings& settings) noexcept;
 void apply_ofxr_mode(LauncherSettings& settings, OfxrMode mode) noexcept;
 // Whether the mode runs FidelityFX flow whatever engine the list has chosen:

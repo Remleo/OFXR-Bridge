@@ -48,6 +48,9 @@ public:
     // was turned, kept while it stays turned even if the other one is turned
     // as well, and through the hide delay once it is not.
     [[nodiscard]] int hand() const noexcept { return hand_; }
+    // Keep the turned controller still to read the panel; the other hand's
+    // stick and trigger edit it. No controls before the panel appears.
+    [[nodiscard]] int input_hand() const noexcept { return visible_ ? 1 - hand_ : -1; }
     void reset() noexcept { *this = FlipGesture{}; }
 
 private:
@@ -78,6 +81,7 @@ enum class PanelVectorStatus : std::uint32_t {
     native_unavailable,
     multi_frame_unsupported,
     no_matching_output,
+    stale_guides,
 };
 
 enum class PanelFlow : std::uint8_t { fidelity_fx, nvidia };
@@ -147,6 +151,7 @@ struct PanelVectors {
     // previous frame this window: the head moved, or the guides' sequence
     // broke. Every pair under a head turn, and the frame is the softer for it.
     std::uint64_t native_resets{};
+    std::uint32_t dlss_width{}, dlss_height{}, eye_width{}, eye_height{};
 };
 
 struct PanelRates {
@@ -198,8 +203,8 @@ struct StatusPanelInput {
     std::uint32_t promise_periods{};
     PanelGraphics graphics{PanelGraphics::d3d12};
     std::string runtime;
-    // The layer's panel controls (a thumbstick and trigger on the controller
-    // the panel sits on) are bound for this session: the panel then lists
+    // The layer's panel controls (the opposite controller's thumbstick and
+    // trigger) are bound for this session: the panel then lists
     // its settings below the status, for editing with them.
     bool controls_bound{};
 };
@@ -214,8 +219,8 @@ struct PanelLine {
     bool highlighted{};
 };
 
-// Editing from the panel. With a controller turned over, its thumbstick
-// moves a cursor through the settings listed below the status and changes
+// Editing from the panel. With a controller turned over, the other hand's
+// thumbstick moves a cursor through the settings below the status and changes
 // the one it stands on; its trigger applies the change. All of it is pure
 // here: the layer reads the inputs and writes the settings.
 enum class PanelSetting : std::uint8_t {
