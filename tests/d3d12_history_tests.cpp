@@ -3677,6 +3677,11 @@ void test_dlss_motion_vector_gpu_ingress(
         frame_a->depth=create_native_test_depth(fixture,width,height);
         frame_a->depth_width=width; frame_a->depth_height=height;
         frame_a->depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
+        // These synthetic frames have a fixed content cadence. GPU readbacks
+        // between assertions must not turn the guide-validation cases into
+        // arrival-time hitch tests that skip validation entirely.
+        frame_a->frame_time_known = true;
+        frame_a->frame_time_delta_ms = 1000.0F / 45.0F;
     }
     auto frame_b = std::make_shared<xrfg::DlssMotionVectorFrame>(*frame_a);
     frame_b->previous_serial = 1;
@@ -3812,6 +3817,16 @@ void test_dlss_motion_vector_gpu_ingress(
         require(readback_pattern(fixture, synthetic_destinations[0].Get(),
             D3D12_RESOURCE_STATE_RENDER_TARGET) == current,
             "native repeated frame depended on unused optical-flow resources");
+        xrfg::D3D12HistoryCaptureTicket stale_capture{};
+        require_hresult(history->capture(1, &stale_capture), "native stale-guides capture");
+        require_hresult(history->commit(stale_capture), "native stale-guides commit");
+        require_hresult(synthesizer.submit_pair(stale_capture, views, views, 0, 1, &pair,
+            std::nullopt, set_b, false, triple ? 1.0F/3.0F : 0.5F, extra_output),
+            "native stale-guides pair");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+        require(xrfg::dlss_motion_vector_statistics().status == xrfg::DlssMotionVectorStatus::stale_guides &&
+                pair.synthetics_repeat_current,
+            "new source frames sharing one DLSS evaluation did not report stale guides");
     }
     // Exercise enough advancing pairs to reuse a work slot.
     std::uint64_t guide_serial = frame_b->serial;
@@ -3855,6 +3870,8 @@ void test_dlss_motion_vector_gpu_ingress(
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*){});
         require(readback_pattern(fixture,synthetic_destinations[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==current,
             "native explicit reset did not show the current frame");
+        require(xrfg::dlss_motion_vector_statistics().status == xrfg::DlssMotionVectorStatus::temporal_mismatch,
+            "native history reset did not report a temporal mismatch");
         // The copy is no generated frame: the layer counts it as a repeat.
         require(!pair.synthetics_in_target_camera && pair.synthetics_repeat_current,
             "a skipped native pair did not say its synthetic is the current frame");
@@ -3873,7 +3890,9 @@ void test_dlss_motion_vector_gpu_ingress(
         require(readback_pattern(fixture,synthetic_destinations[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==current,
             "native missing depth fabricated an interpolated frame");
         require(xrfg::dlss_motion_vector_statistics().status==xrfg::DlssMotionVectorStatus::waiting_for_depth,
-            "native missing depth did not report the waiting state");
+            ("native missing depth did not report the waiting state: status=" +
+                std::to_string(static_cast<int>(xrfg::dlss_motion_vector_statistics().status)) +
+                " deferred=" + std::to_string(deferred) + " cropped=" + std::to_string(cropped)).c_str());
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "DLSS-motion final drain failed");
     require(operation_succeeded(history->invalidate()), "DLSS-motion history invalidate failed");
