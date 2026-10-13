@@ -1478,6 +1478,15 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             bg->eye_count > 2) {
             return skip(Skip::guides);
         }
+        // Missing depth prevents native generation regardless of history.
+        // Preserve that actionable diagnostic even after a reset/stale pair.
+        for (const auto* guides : {ag, bg}) {
+            for (UINT eye = 0; eye < guides->eye_count; ++eye) {
+                if (guides->eyes[eye] && !guides->eyes[eye]->depth) {
+                    return skip(Skip::guides);
+                }
+            }
+        }
         // Validate the entire stereo pair before writing a command. No partial
         // eye, guessed depth, or cross-stream history is handed to NGX.
         const auto guide_index = [&](UINT i) {
