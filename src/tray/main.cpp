@@ -1,4 +1,5 @@
 #include "xrfg/benchmark_labels.hpp"
+#include "xrfg/dlssg_profile.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/standalone_launcher.hpp"
 #include "benchmark_window.hpp"
@@ -6,6 +7,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -13,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -114,6 +117,10 @@ enum MenuCommand : UINT {
     panel_gesture = 171,
     panel_always = 172,
     panel_off = 173,
+    dlssg_choose_game = 180,
+    dlssg_model_default = 181,
+    dlssg_model_a = 182,
+    dlssg_model_c = 183,
 };
 
 struct AppState {
@@ -158,6 +165,11 @@ struct AppState {
     // "Benchmark this PC": its results label the menu's methods.
     ofxr_tray::BenchmarkController benchmark;
 };
+
+std::filesystem::path dlssg_profile_game(const xrfg::standalone::LauncherSettings& settings) {
+    const auto& utf8 = settings.native_profile_executable;
+    return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+}
 
 [[nodiscard]] std::wstring last_error_message(std::wstring_view action) {
     const DWORD code = GetLastError();
@@ -1358,6 +1370,30 @@ void show_context_menu(AppState& state) {
                      L"NVIDIA optical flow both ways (cleaner edges)", settings.nvidia_bidirectional,
                      nvidia_flow, false, both_ways);
 #ifdef XRFG_NATIVE_DLSSG
+        if (HMENU models = CreatePopupMenu()) {
+            const auto game = dlssg_profile_game(settings);
+            xrfg::standalone::DlssgProfile profile;
+            std::wstring error;
+            const bool available = !game.empty() &&
+                xrfg::standalone::read_dlssg_profile(game, profile, error);
+            append_entry(models, dlssg_choose_game, L"Choose game executable\u2026", false, true, false);
+            if (!game.empty()) append_note(models, game.filename().wstring());
+            if (!profile.name.empty()) append_note(models, L"NVIDIA profile: " + profile.name);
+            if (!error.empty()) append_note(models, error);
+            append_separator(models);
+            append_entry(models, dlssg_model_default, L"Game default (remove override)",
+                         available && !profile.custom_override, available, true);
+            append_entry(models, dlssg_model_a, L"Preset A (standard)",
+                         available && profile.custom_override && profile.enabled && profile.preset == 1,
+                         available, true);
+            append_entry(models, dlssg_model_c, L"Preset C (performance)",
+                         available && profile.custom_override && profile.enabled && profile.preset == 3,
+                         available, true);
+            append_separator(models);
+            append_note(models, L"Restart the game after changing the model");
+            append_note(models, L"Preset C requires the updated NVIDIA app beta model");
+            append_submenu(quality, models, L"DLSS Frame Generation model");
+        }
         // Below 100%, NVIDIA generates at a lower resolution and the bridge
         // puts back the real frame's detail wherever it can follow the
         // game's motion. On recorded Galactic Racer frames 67% and 50% had
@@ -1540,6 +1576,45 @@ void handle_command(AppState& state, UINT command) {
             ? L"DLSS Frame Generation will follow the camera's motion the next time the game starts: a feature per eye, more GPU time."
             : L"DLSS Frame Generation will share one feature between the eyes the next time the game starts.");
         break;
+    case dlssg_choose_game: {
+        std::array<wchar_t, 32768> filename{};
+        const auto previous = dlssg_profile_game(state.settings).wstring();
+        if (previous.size() < filename.size()) std::copy(previous.begin(), previous.end(), filename.begin());
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = state.window;
+        dialog.lpstrFilter = L"Game executable (*.exe)\0*.exe\0\0";
+        dialog.lpstrFile = filename.data();
+        dialog.nMaxFile = static_cast<DWORD>(filename.size());
+        dialog.lpstrTitle = L"Choose the game's rendering executable";
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+        if (GetOpenFileNameW(&dialog)) {
+            const auto utf8 = std::filesystem::path(filename.data()).u8string();
+            state.settings.native_profile_executable.assign(utf8.begin(), utf8.end());
+            save_settings(state);
+            show_balloon(state, L"DLSS Frame Generation model",
+                         L"Game selected. Choose Preset A, Preset C, or Game default in Quality and performance.");
+        } else if (const DWORD error = CommDlgExtendedError()) {
+            show_error(state.window, L"Could not open the game picker (" + std::to_wstring(error) + L").");
+        }
+        break;
+    }
+    case dlssg_model_default:
+    case dlssg_model_a:
+    case dlssg_model_c: {
+        using xrfg::standalone::DlssgPreset;
+        const auto preset = command == dlssg_model_a ? DlssgPreset::a
+            : command == dlssg_model_c ? DlssgPreset::c : DlssgPreset::game_default;
+        std::wstring error;
+        if (!xrfg::standalone::write_dlssg_profile(
+                dlssg_profile_game(state.settings), preset, error)) {
+            show_error(state.window, error);
+        } else {
+            show_balloon(state, L"DLSS Frame Generation model saved",
+                         L"Restart the selected game to use the updated NVIDIA profile. Other settings in the profile are preserved.");
+        }
+        break;
+    }
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;
         update_runtime_options(state);
@@ -1986,6 +2061,40 @@ LRESULT CALLBACK window_procedure(
     return retired;
 }
 
+// Also used by repeatable game benchmarks; shares the menu's profile path.
+[[nodiscard]] std::optional<int> run_dlssg_profile_command() {
+    int count = 0;
+    LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!args) return EXIT_FAILURE;
+    if (count < 2 || std::wstring_view(args[1]) != L"--dlssg-preset") {
+        LocalFree(args);
+        return std::nullopt;
+    }
+    const std::wstring mode = count == 4 ? args[2] : L"";
+    const std::filesystem::path game = count == 4 ? args[3] : L"";
+    LocalFree(args);
+    using namespace xrfg::standalone;
+    if (mode != L"A" && mode != L"C" && mode != L"default" && mode != L"status") {
+        std::fwprintf(stderr, L"Usage: OFXRBridgeTray.exe --dlssg-preset A|C|default|status \"full game.exe path\"\n");
+        return 2;
+    }
+    std::wstring error;
+    if (mode != L"status" && !write_dlssg_profile(game,
+            mode == L"A" ? DlssgPreset::a : mode == L"C" ? DlssgPreset::c : DlssgPreset::game_default, error)) {
+        std::fwprintf(stderr, L"%ls\n", error.c_str());
+        return EXIT_FAILURE;
+    }
+    DlssgProfile profile;
+    if (!read_dlssg_profile(game, profile, error)) {
+        std::fwprintf(stderr, L"%ls\n", error.c_str());
+        return EXIT_FAILURE;
+    }
+    std::fwprintf(stdout, L"Profile: %ls\nFG override enabled: %u\nPreset: %u\nCustom override: %u\n",
+                  profile.name.c_str(), unsigned(profile.enabled), profile.preset, unsigned(profile.custom_override));
+    if (mode != L"status") std::fwprintf(stdout, L"Saved. Restart the game to apply.\n");
+    return EXIT_SUCCESS;
+}
+
 [[nodiscard]] std::optional<int> run_cleanup_helper() {
     int argument_count = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
@@ -2043,6 +2152,7 @@ LRESULT CALLBACK window_procedure(
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    if (const auto result = run_dlssg_profile_command()) return *result;
     if (const auto helper_result = run_cleanup_helper()) {
         return *helper_result;
     }

@@ -412,6 +412,12 @@ HRESULT acquire_ngx(ID3D12Device *d) {
         info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
         info.LoggingInfo.LoggingCallback = [](const char *message, NVSDK_NGX_Logging_Level,
                                               NVSDK_NGX_Feature) {
+            // GUI games normally have no stderr sink. Keep the runtime and
+            // effective driver override in our verbose diagnostic log too.
+            if (message && (std::strstr(message, "feature dlssg snippet:") ||
+                            std::strstr(message, "ReportOverrideStates: render preset"))) {
+                diagnose("NGX: %s", message);
+            }
             std::fprintf(stderr, "NGX: %s\n", message);
         };
     }

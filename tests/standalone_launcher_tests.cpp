@@ -42,6 +42,17 @@ int main() {
         !contains(default_runtime_ini, "frame_generation=ofxr")) return 1;
     LauncherSettings native_settings;
     native_settings.frame_generation = FrameGeneration::native_dlss;
+    // The selected game survives tray saves and headset changes, but is
+    // never a layer setting: the model itself belongs to its driver profile.
+    native_settings.native_profile_executable = "E:\\Games\\Rac\xC3\xA9\\Shipping.exe";
+    auto selected_game = parse_settings(serialize_settings(native_settings));
+    if (!adopt_runtime_ini(selected_game, "[ofxr]\ndlssg_resolution=50\n") ||
+        selected_game.native_scale != 50 ||
+        selected_game.native_profile_executable != native_settings.native_profile_executable ||
+        contains(build_runtime_ini(selected_game), "dlssg_profile_executable")) {
+        std::cerr << "DLSS FG profile target did not survive tray/runtime synchronization\n";
+        return 1;
+    }
     if (parse_settings(serialize_settings(native_settings)).frame_generation != FrameGeneration::native_dlss ||
         !contains(build_runtime_ini(native_settings), "frame_generation=dlss") ||
         parse_settings("[tray]\nframe_generation=unknown\n").frame_generation != FrameGeneration::ofxr) return 1;

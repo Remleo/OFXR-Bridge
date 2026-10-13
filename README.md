@@ -54,6 +54,11 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
 
 ## Native DLSS Frame Generation
 
+Switch **Preset A / Performance Preset C** in the tray's **Quality and
+performance → DLSS Frame Generation model** menu. Choose the game executable,
+then restart the game after changing its model. C requires NVIDIA's updated
+app beta runtime. See [setup, verification and measurements](docs/DLSS_FG_PRESET_C.md).
+
 ### How it works
 
 - **The game's DLSS guides are captured from its upscaler.** A native-enabled

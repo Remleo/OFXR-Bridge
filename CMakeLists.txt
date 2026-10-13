@@ -504,6 +504,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     if(XRFG_BUILD_STANDALONE)
         add_library(xrfg_standalone_core STATIC
+            src/tray/dlssg_profile.cpp
             src/tray/benchmark_labels.cpp
             src/tray/standalone_launcher.cpp
             include/xrfg/benchmark_labels.hpp
@@ -573,6 +574,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_standalone_core
             xrfg_tray_benchmark
             comctl32
+            comdlg32
             gdi32
             ole32
             shell32

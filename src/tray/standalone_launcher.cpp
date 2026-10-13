@@ -192,6 +192,8 @@ LauncherSettings parse_settings(std::string_view text) {
                     settings.native_scale = percent >= 25 && percent <= 100 ? percent : 67;
                 } else if (key == "dlssg_camera") {
                     settings.native_camera = value == "1" || lower_ascii(value) == "true";
+                } else if (key == "dlssg_profile_executable") {
+                    settings.native_profile_executable = value;
                 } else if (key == "backend") {
                     settings.backend = lower_ascii(value) == "nvidia"
                         ? FlowBackend::nvidia
@@ -343,6 +345,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
            "\r\ndlssg_camera=" + (settings.native_camera ? "1" : "0") +
+           "\r\ndlssg_profile_executable=" + settings.native_profile_executable +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +
            "\r\nnvidia_input_scale=" +

@@ -41,6 +41,9 @@ struct LauncherSettings {
     // camera's own motion to each pair and hands it to NGX, a feature per
     // eye. Off by default: more GPU time, for third-person camera turns.
     bool native_camera{};
+    // UTF-8 path selected in the tray's DLSS FG model menu. The preset
+    // itself lives in this game's NVIDIA profile, not the runtime INI.
+    std::string native_profile_executable;
     // NVIDIA optical flow, medium, is the default: the layer falls back to
     // FidelityFX on its own where NVIDIA cannot initialise, so the default
     // can be the better backend without a GPU check here.
