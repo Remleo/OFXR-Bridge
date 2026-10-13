@@ -12,6 +12,7 @@
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/provider_api.hpp"
+#include "xrfg/presenter_release_phase.hpp"
 #include <atomic>
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
@@ -1480,7 +1481,7 @@ struct SessionState {
     // under the grid. Pimax's two-clock stacking needs a wait that blocks
     // every frame, which Virtual Desktop's does not. Presenter thread only.
     std::chrono::steady_clock::time_point presenter_last_end_returned_at{};
-    // 3X only: how long the application is kept, after its frame is handed
+    // SteamVR 3X only: how long the application is kept, after its frame is handed
     // over, before it is released to render the next one.
     //
     // Released at the previous real frame's hand-over, an application that
@@ -1505,9 +1506,7 @@ struct SessionState {
     // real frame's hand-over, which was the first version of this test -
     // left most of that period unused: The Callisto Protocol settled at 4 ms
     // of delay with the application still finishing 8 ms before it could be
-    // queued. A runtime that paces the presenter with its own wait gives no
-    // such hold to look from, and there the test stays at the previous real
-    // frame's hand-over.
+    // queued. Other runtimes use release_phase instead.
     //
     // It is judged over thirty frames, a second of them, because a frame
     // that runs long is late whatever the delay, and stepping back for each
@@ -1531,6 +1530,12 @@ struct SessionState {
     // A real frame has gone out and the next hand-over is a frame's first
     // synthetic: the pace looks at it before that hand-over.
     bool triple_release_probe_due{};
+    // V452 readiness-based release on non-SteamVR runtimes. The queued
+    // group anchor is valid both before and after enqueue; never predict an
+    // unqueued sequence at the D3D11/Vulkan admission gate. presenter_mutex.
+    xrfg::PresenterReleasePhase release_phase;
+    std::uint64_t presenter_popped_sequence{};
+    std::uint64_t release_group_first{}, release_group_last{};
     // The application's thread only.
     HANDLE application_release_timer{};
     // A condition variable waits on the system tick, which is 15.6 ms by
@@ -8583,6 +8588,10 @@ struct PendingPrivateRelease {
     const std::shared_ptr<Dispatch>& dispatch,
     PrivateSwapchainState& image) noexcept;
 
+struct ReleaseGroupReadiness {
+    bool judged{}, unwritten{};
+};
+
 struct GeneratedFrameEndInfo {
     bool synthetic{};
     // A synthetic whose every image is a copy of the real frame that follows
@@ -8594,6 +8603,11 @@ struct GeneratedFrameEndInfo {
     // The first of an application frame's submissions, when that is a
     // synthetic: the one the 3X release delay is judged on.
     bool leads_frame{};
+    // These refer to the actual generated image and the group's last
+    // submission, including real-first extrapolation. Shared so a held
+    // leader is counted once, and the window closes only for its own group.
+    bool release_leader{}, release_group_end{};
+    std::shared_ptr<ReleaseGroupReadiness> release_readiness;
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
@@ -9159,6 +9173,36 @@ void log_triple_release(const TripleReleaseReport& report) noexcept {
         static_cast<std::uint64_t>(report.delay_us),
         report.late | (static_cast<std::uint64_t>(report.unwritten) << 16),
         static_cast<std::uint64_t>(report.ceiling_us));
+}
+
+// presenter_mutex held. A held leader must not be counted again at its pop.
+void judge_release_readiness(GeneratedFrameEndInfo& frame) noexcept {
+    if (frame.release_leader && frame.release_readiness &&
+        !frame.release_readiness->judged) {
+        frame.release_readiness->judged = true;
+        frame.release_readiness->unwritten = !synthetic_output_ready(frame);
+    }
+}
+
+bool release_leader_ready(const SessionState& state) noexcept {
+    // Extrapolation puts a real frame before the first synthetic.
+    for (const auto& request : state.presenter_submissions) {
+        if (request->owned_frame && request->owned_frame->release_leader)
+            return synthetic_output_ready(*request->owned_frame);
+        if (!request->owned_frame || request->owned_frame->release_group_end)
+            break;
+    }
+    return false;
+}
+
+// 802: a depth in slots before the group end; b unwritten | early << 16;
+// c step (0 hold, 1 earlier, 2 later) | maximum depth << 8. Non-SteamVR only.
+void log_release_phase(const xrfg::PresenterReleasePhase::Report& report) noexcept {
+    if (!report.due) return;
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition, 802, report.depth,
+        report.unwritten | (static_cast<std::uint64_t>(report.early) << 16),
+        report.step | (static_cast<std::uint64_t>(report.maximum) << 8));
 }
 
 void pace_presenter_submission(
@@ -9836,8 +9880,7 @@ void continuous_presenter_main(
             std::int64_t held_age_ns = -1;
             std::uint64_t held_sequence = 0;
             std::int64_t held_reason = 0;
-            // 3X release delay, recorded after the lock.
-            TripleReleaseReport release_report{};
+            xrfg::PresenterReleasePhase::Report phase_report{};
             {
                 std::scoped_lock lock(state->presenter_mutex);
                 if (!state->presenter_stop_requested &&
@@ -9880,6 +9923,8 @@ void continuous_presenter_main(
                         held_sequence = front->sequence;
                         held_reason = too_young ? 400 : 401;
                         repeated_frame = state->presenter_last_frame;
+                        if (not_written && !state->dispatch->steamvr_runtime)
+                            judge_release_readiness(*front->owned_frame);
                     } else {
                         if (too_young || not_written) {
                             // Recorded below as 402: would have held.
@@ -9890,8 +9935,21 @@ void continuous_presenter_main(
                         }
                         request = front;
                         state->presenter_submissions.pop_front();
-                        // 3X release delay; see triple_release_delay.
-                        if (state->frames_per_application_frame > 2 &&
+                        state->presenter_popped_sequence = request->sequence;
+                        if (!state->dispatch->steamvr_runtime && request->owned_frame) {
+                            auto& frame = *request->owned_frame;
+                            judge_release_readiness(frame);
+                            if (frame.release_group_end && frame.release_readiness &&
+                                frame.release_readiness->judged) {
+                                phase_report = state->release_phase.observe(
+                                    frame.release_readiness->unwritten,
+                                    release_leader_ready(*state),
+                                    state->frames_per_application_frame.load());
+                            }
+                        }
+                        // Keep SteamVR's existing 3X delay and rephasing.
+                        if (state->dispatch->steamvr_runtime &&
+                            state->frames_per_application_frame > 2 &&
                             request->owned_frame) {
                             if (request->owned_frame->leads_frame) {
                                 if (!synthetic_output_ready(
@@ -9901,16 +9959,8 @@ void continuous_presenter_main(
                             } else if (!request->owned_frame->synthetic) {
                                 // A real frame is going out, so the next
                                 // hand-over is a first synthetic. SteamVR's
-                                // pace looks at it the margin before that;
-                                // elsewhere this is the only place to look.
-                                if (state->dispatch->steamvr_runtime) {
-                                    state->triple_release_probe_due = true;
-                                } else {
-                                    observe_triple_release(
-                                        *state,
-                                        triple_leader_ready(*state),
-                                        &release_report);
-                                }
+                                // pace looks at it the margin before that.
+                                state->triple_release_probe_due = true;
                             }
                         }
                     }
@@ -9924,7 +9974,9 @@ void continuous_presenter_main(
             // of those, handed over anyway because there was no frame to
             // repeat. a is its age in microseconds, b the display period in
             // microseconds, c its sequence.
-            log_triple_release(release_report);
+            // The sequence gate waits for a pop, not a retirement or repeat.
+            state->presenter_condition.notify_all();
+            log_release_phase(phase_report);
             if (held_age_ns >= 0) {
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_transition,
@@ -11052,10 +11104,14 @@ void continuous_presenter_main(
         }
         state->presenter_failure = XR_SUCCESS;
         state->next_presenter_sequence = 1;
+        state->presenter_popped_sequence = 0;
+        state->release_group_first = state->release_group_last = 0;
+        state->release_phase.reset_window(state->frames_per_application_frame.load());
         state->outstanding_presenter_submissions = 0;
         if (state->pipelined_presenter_mode && seed_frame) {
             auto request = std::make_shared<PresenterSubmission>();
             request->sequence = state->next_presenter_sequence++;
+            state->release_group_first = state->release_group_last = request->sequence;
             request->owned_frame = std::move(seed_frame);
             state->presenter_submissions.push_back(std::move(request));
             state->outstanding_presenter_submissions = 1;
@@ -11197,7 +11253,8 @@ void observe_admission_wait(
     constexpr std::uint32_t kLongestBackoff = 64;
     const auto period = std::chrono::nanoseconds(
         static_cast<std::int64_t>(state.presenter_display_period));
-    if (state.frames_per_application_frame != 2U ||
+    if (!state.dispatch || !state.dispatch->steamvr_runtime ||
+        state.frames_per_application_frame != 2U ||
         period <= std::chrono::nanoseconds::zero() ||
         state.runtime_slowed.load(std::memory_order_relaxed)) {
         state.admission_late_run = 0;
@@ -11252,8 +11309,9 @@ void observe_admission_wait(
     return !(state.dispatch && state.dispatch->steamvr_runtime);
 }
 
-// Holds the application until the presenter has run `presenter_frames` frames
-// since it was last released: a whole pair for a pair, one frame for a prime.
+// On non-SteamVR runtimes, holds until a chosen submission in the most
+// recently queued group is popped. Readiness feedback chooses its position.
+// SteamVR retains its serial hold: `presenter_frames` since the last release.
 // Deliberately returns nothing: it is called after the frame has already been
 // handed over, so a presenter that stops or fails while this waits must not
 // turn a submitted frame into an error - it just stops waiting.
@@ -11295,6 +11353,12 @@ void wait_for_presenter_pair(
         const std::uint64_t kPresenterFramesPerPair = presenter_frames;
         const auto entered = std::chrono::steady_clock::now();
         std::unique_lock lock(state->presenter_mutex);
+        const bool sequence_gate = state->dispatch && !state->dispatch->steamvr_runtime;
+        // Before enqueue this anchors to the previous submitted group; after
+        // enqueue to the current one. Both targets can actually be popped.
+        const auto target = state->release_phase.target(
+            state->release_group_first, state->release_group_last,
+            state->frames_per_application_frame.load());
         state->presenter_condition.wait(lock, [&] {
             // A presenter with nothing queued and nothing to repeat stops
             // counting until the application gives it something - which,
@@ -11304,9 +11368,10 @@ void wait_for_presenter_pair(
             const bool presenter_starved =
                 state->presenter_submissions.empty() &&
                 state->presenter_last_frame == nullptr;
-            return state->presenter_frame_serial >=
-                       state->application_served_serial +
-                           kPresenterFramesPerPair ||
+            return (sequence_gate
+                       ? state->presenter_popped_sequence >= target
+                       : state->presenter_frame_serial >=
+                             state->application_served_serial + kPresenterFramesPerPair) ||
                    presenter_starved ||
                    XR_FAILED(state->presenter_failure) ||
                    state->presenter_stop_requested;
@@ -11320,30 +11385,19 @@ void wait_for_presenter_pair(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - entered).count(),
             std::memory_order_relaxed);
-        // Diagnostic only, and the number this hold is judged by. Assigning
-        // the presenter's serial rather than advancing by the pair means an
-        // application that arrives late catches up in one step: the surplus
-        // below is what that step discards, and while it is non-zero this
-        // hold is not throttling anything - the application is gated only by
-        // whatever it blocks on next, which is the frame-start synthesis
-        // fence, and that one meters nothing.
-        const std::uint64_t served = state->application_served_serial;
-        const std::uint64_t reached = state->presenter_frame_serial;
-        const std::uint64_t surplus =
-            reached > served + kPresenterFramesPerPair
-            ? reached - served - kPresenterFramesPerPair
-            : 0;
-        state->application_served_serial = reached;
-        // 3X only: see triple_release_delay. A pair is released as soon as
-        // the presenter has run it. A delay that steered the application's
-        // completion away from the presenter's cycle boundary used to sit
-        // here on every runtime but SteamVR; it only ever stepped later, and
-        // whatever it reached came out of the application's two periods. At
-        // 90 Hz, 10.7 ms of it on a 12.2 ms frame put half the frames past
-        // their slot and the application at 39 a second, against 45 with
-        // 5.9 ms on the same frame.
+        // Record how far past the target the presenter reached. SteamVR
+        // still rebases its serial on release; sequence pacing never lets
+        // repeats or a late application move the target inside its group.
+        const std::uint64_t served = sequence_gate ? target : state->application_served_serial;
+        const std::uint64_t reached = sequence_gate
+            ? state->presenter_popped_sequence : state->presenter_frame_serial;
+        const std::uint64_t threshold = sequence_gate ? target : served + kPresenterFramesPerPair;
+        const std::uint64_t surplus = reached > threshold ? reached - threshold : 0;
+        if (!sequence_gate) state->application_served_serial = reached;
+        // Keep the existing SteamVR 3X delay. Non-SteamVR pacing is entirely
+        // determined by the sequence target and its readiness feedback.
         const std::chrono::nanoseconds release_offset =
-            presenter_frames > 2
+            !sequence_gate && presenter_frames > 2
                 ? state->triple_release_delay
                 : std::chrono::nanoseconds::zero();
         // Never record under presenter_mutex: the presenter thread takes it
@@ -11460,6 +11514,7 @@ enqueue_presenter_submission(
             return request;
         }
         request->sequence = state->next_presenter_sequence++;
+        state->release_group_first = state->release_group_last = request->sequence;
         request->owned_frame = std::move(owned_frame);
         request->borrowed_frame = borrowed_frame;
         request->queued_at = std::chrono::steady_clock::now();
@@ -11494,9 +11549,9 @@ enqueue_presenter_submission(
     }
 }
 
-// One application frame's submissions, in the order they are shown: the
-// synthetic, the second synthetic where the session makes one (null
-// otherwise), then the real frame.
+// One application's group, in display order. Interpolation ends with the
+// real image; extrapolation starts with it. Sequence pacing anchors to the
+// group end in both cases, while readiness judges the first synthetic.
 [[nodiscard]] XrResult enqueue_presenter_pair(
     const std::shared_ptr<SessionState>& state,
     std::shared_ptr<GeneratedFrameEndInfo> synthetic,
@@ -11510,11 +11565,28 @@ enqueue_presenter_submission(
                 ? state->presenter_failure
                 : XR_ERROR_SESSION_NOT_RUNNING;
         }
+        if (!state->dispatch->steamvr_runtime && synthetic && current) {
+            auto readiness = std::make_shared<ReleaseGroupReadiness>();
+            bool found_leader = false;
+            for (const auto& frame : {synthetic, extra_synthetic, current}) {
+                if (frame && frame->synthetic && !frame->repeats_current) {
+                    if (frame != synthetic) frame->synthetic_ready = synthetic->synthetic_ready;
+                    frame->release_leader = !found_leader;
+                    frame->release_readiness = readiness;
+                    found_leader = true;
+                }
+            }
+            if (found_leader) {
+                current->release_group_end = true;
+                current->release_readiness = std::move(readiness);
+            }
+        }
         const auto queued_at = std::chrono::steady_clock::now();
         const std::uint64_t app_release_value =
             state->app_end_frame_release_value;
         auto first = std::make_shared<PresenterSubmission>();
         first->sequence = state->next_presenter_sequence++;
+        state->release_group_first = first->sequence;
         first->owned_frame = std::move(synthetic);
         first->queued_at = queued_at;
         first->app_release_value = app_release_value;
@@ -11535,6 +11607,7 @@ enqueue_presenter_submission(
         }
         auto second = std::make_shared<PresenterSubmission>();
         second->sequence = state->next_presenter_sequence++;
+        state->release_group_last = second->sequence;
         second->owned_frame = std::move(current);
         second->queued_at = queued_at;
         second->app_release_value = app_release_value;
@@ -12759,11 +12832,9 @@ struct PreparedProjectionFrame {
             // the publish copy on the application's context, not synthesis:
             // the runtime reads the D3D11 images the copy writes. Both
             // accessors hand back a fence the presenter can poll without
-            // either object's lock.
-            // And 3X, where the release delay is steered on it.
-            if (request_pair &&
-                (state->session->deep_pipeline ||
-                 state->session->frames_per_application_frame > 2)) {
+            // either object's lock. Every pair needs it for readiness-based
+            // pacing, including 2X without the deeper pipeline.
+            if (request_pair) {
                 if (generation->interop) {
                     std::uint64_t published = 0;
                     if (SUCCEEDED(generation->interop->publication_fence(
@@ -14266,7 +14337,8 @@ void apply_live_frame_multiplier(
             state->triple_release_window_late = 0;
             state->triple_release_window_unwritten = 0;
             state->triple_release_probe_due = false;
-            // The once-per-frame hold counts from here in the new shape.
+            state->release_phase.change_shape(target);
+            // SteamVR's once-per-frame hold counts from here in the new shape.
             state->application_served_serial = state->presenter_frame_serial;
         }
         clear_generation_continuity(state);
@@ -15152,7 +15224,7 @@ XrResult layer_end_frame_impl(
             observe_admission_wait(
                 *state, std::chrono::steady_clock::now() - admission_entered);
         }
-                if (presenter_hold_at_admission(*state) &&
+        if (presenter_hold_at_admission(*state) &&
             (metadata_pairable || presenter_holds_primes(*state))) {
             // The once-per-pair hold, ahead of synthesis rather than after the
             // hand-over: see presenter_hold_at_admission for why the placement

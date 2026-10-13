@@ -27,6 +27,12 @@ original OFXR. The fork's work is on the `native-dlss-fg` branch. It sits on
 top of upstream release v0.2.13.1 (internal build V438) and builds as internal
 version **V439**.
 
+[Release 37](docs/releases/0.2.13.37-dlssg-V439.md) ports upstream V452's
+adaptive presenter pacing for non-SteamVR runtimes. It uses generated-image
+readiness to choose when the game can start its next frame, with adaptations
+for this fork's D3D11/Vulkan admission and real-first extrapolation paths.
+SteamVR retains its existing pacing.
+
 The fork adds **native NVIDIA DLSS Frame Generation** (NGX DLSS-G) as a VR
 frame-generation backend. It sits alongside the methods OFXR already had:
 

@@ -63,7 +63,13 @@ int main(int argc, char** argv) {
     // single-threaded session that had the presenter moves its loop to
     // another thread, and the presenter a pass-through stopped comes back.
     //
-    const bool frame_loop_test = mode == "frame-loop";
+    const bool release_phase_test = mode == "release-phase";
+    if (release_phase_test && argc != 6) return 1;
+    const bool phase_d3d11 = release_phase_test && std::string(argv[3]).starts_with("d3d11");
+    const bool phase_steamvr = release_phase_test && std::string(argv[3]) == "d3d11-steamvr";
+    const bool phase_extrapolate = release_phase_test && std::string(argv[4]) == "extrapolate";
+    const bool phase_triple = release_phase_test && std::string(argv[5]) == "3";
+    const bool frame_loop_test = mode == "frame-loop" || release_phase_test;
     // "recorder": the flight recorder switched on, off and on again while a
     // session runs.
     const bool recorder_test = mode == "recorder";
@@ -83,12 +89,12 @@ int main(int argc, char** argv) {
     // period grid, as a real runtime's are, so the inline cycle's extra wait
     // and submission at 3X round the game's frame up by a slot: 3X, then 2X
     // back (700 with c=4), and no third switch.
-    g_paced_wait_mode = mode == "auto-frames-inline-paced";
+    g_paced_wait_mode = mode == "auto-frames-inline-paced" || (release_phase_test && !phase_steamvr);
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
-    const std::string loop_runtime = frame_loop_test ? argv[3] : "";
+    const std::string loop_runtime = release_phase_test ? "virtual-desktop" : frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
     const bool handoff_loop = frame_loop_test && std::string(argv[4]) == "handoff";
-    const bool start_paused = frame_loop_test && argc == 6;
+    const bool start_paused = frame_loop_test && !release_phase_test && argc == 6;
     if (handoff_loop && (loop_runtime != "virtual-desktop" || start_paused)) return 1;
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
@@ -101,7 +107,12 @@ int main(int argc, char** argv) {
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
     g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr" || switch_test || mode == "auto-frames";
-    g_d3d11_interop_mode = mode == "d3d11";
+    if (phase_steamvr) {
+        g_runtime_name_override = "SteamVR/OpenXR";
+        g_steamvr_runtime_mode = g_steamvr_presenter_mode = true;
+    }
+    g_d3d11_interop_mode = mode == "d3d11" || phase_d3d11;
+    g_d3d11_bridge_mode = phase_d3d11;
     // The interop keeps the private rings; every D3D12 mode takes the
     // single-swapchain rings the shipped ini turns on.
     g_single_rings = mode != "d3d11";
@@ -141,8 +152,11 @@ int main(int argc, char** argv) {
             std::ofstream ini(root / L"ofxr_bridge.ini");
             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
                 << (auto_test ? "\nframes_auto=1" : "")
+                << (release_phase_test ? "\ndeep_pipeline=1\nd3d11_bridge=1\nsynthetic_pose=0" : "")
+                << (phase_extrapolate ? "\nextrapolate=1" : "")
+                << (phase_triple ? "\ntriple_frame_gen=1" : "")
                 // The hand-off is read back from the flight log.
-                << "\n[diagnostics]\nlogging_enabled=" << (handoff_loop || auto_test || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << "\n[diagnostics]\nlogging_enabled=" << (release_phase_test || handoff_loop || auto_test || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
         require(g_d3d11_interop_mode ? initialize_d3d11() : initialize_d3d12(), "initialize GPU fixture");
@@ -197,6 +211,11 @@ int main(int argc, char** argv) {
         layer.nextInfo = &next;
         XrInstanceCreateInfo info{XR_TYPE_INSTANCE_CREATE_INFO};
         info.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
+        const char* const phase_extensions[] = {"XR_KHR_D3D11_enable"};
+        if (phase_d3d11) {
+            info.enabledExtensionNames = phase_extensions;
+            info.enabledExtensionCount = 1;
+        }
         require(XR_SUCCEEDED(request.createApiLayerInstance(&info, &layer, &instance)), "create instance");
         const auto get = request.getInstanceProcAddr;
         const auto create_session = get_layer_function<PFN_xrCreateSession>(get, "xrCreateSession");
@@ -408,11 +427,31 @@ int main(int argc, char** argv) {
             }
             // Past the thirty pairs the bunched-pair detector needs.
             int presenter_at = -1;
-            for (int i = 0; i < 45; ++i) {
+            for (int i = 0; i < (release_phase_test ? 140 : 45); ++i) {
                 const XrDuration period = frame(false, "generating frame");
-                if (presenter_at < 0 && period == kFakeDisplayPeriod * 2) presenter_at = i;
+                if (presenter_at < 0 && period == kFakeDisplayPeriod * (phase_triple ? 3 : 2)) presenter_at = i;
             }
             require(g_synthetic_release_calls.load() > 0, "generation ran");
+            if (release_phase_test) {
+                require(presenter_at >= 0, "release-phase scenario used the presenter");
+                std::string log;
+                for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                    if (entry.path().filename().string().starts_with("ofxr-bridge-flight-")) {
+                        std::ifstream input(entry.path(), std::ios::binary);
+                        log.append(std::istreambuf_iterator<char>(input), {});
+                    }
+                }
+                std::size_t windows = 0;
+                const std::string marker = "op=presenter_transition result=802 ";
+                for (auto at = log.find(marker); at != std::string::npos; at = log.find(marker, at + 1)) ++windows;
+                require(phase_steamvr ? windows == 0 : windows >= 3,
+                    "readiness windows cover both group orders and exclude SteamVR");
+                std::cout << "release phase " << argv[3] << ' ' << argv[4] << ' ' << argv[5]
+                          << "X: 140 frames completed, " << windows << " readiness windows" << std::endl;
+                result = 0;
+                throw FinishedEarly{};
+            }
+
             std::cout << "frame loop " << loop_runtime << (split_loop ? " split" : " single")
                       << (start_paused ? " paused" : "") << ": presenter at frame "
                       << presenter_at << std::endl;

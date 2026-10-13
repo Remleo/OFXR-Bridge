@@ -67,14 +67,11 @@ enum class BridgeFlightOperation : std::uint32_t {
     // own time. A runtime that stops asking for frames says so here and
     // nowhere else the layer can see.
     session_state,
-    // The once-per-pair hold releasing the application. result is the serial
-    // surplus the release discarded - the presenter had run that many frames
-    // beyond the two this hold is for, so the application had already missed
-    // its slot and the hold throttled nothing. a is how long it waited in
-    // microseconds, b the presenter's frame serial, c the serial the
-    // application had been served to. Zero surplus is the hold working; a
-    // surplus is the application running free, gated only by whatever it
-    // blocks on next.
+    // The hold releasing the application. a is the wait in microseconds.
+    // On non-SteamVR runtimes, b is the latest popped submission sequence,
+    // c the target sequence, and result the surplus beyond that target.
+    // On SteamVR, b is the presenter's frame serial, c the previously served
+    // application serial, and result the surplus beyond c + group size.
     presenter_pair_release,
     // How hard the runtime-entry gate is actually working on a D3D11 session.
     // result is the number of entries in this window that had to wait, a the

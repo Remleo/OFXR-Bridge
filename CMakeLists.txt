@@ -74,6 +74,10 @@ if(XRFG_BUILD_TESTS)
         target_compile_definitions(xrfg_core_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     add_test(NAME xrfg_core_tests COMMAND xrfg_core_tests)
+    add_executable(xrfg_presenter_release_phase_tests tests/presenter_release_phase_tests.cpp)
+    target_link_libraries(xrfg_presenter_release_phase_tests PRIVATE xrfg_core)
+    add_test(NAME xrfg_presenter_release_phase_tests COMMAND xrfg_presenter_release_phase_tests)
+
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
     add_test(NAME xrfg_fps_overlay_tests COMMAND xrfg_fps_overlay_tests)
@@ -839,6 +843,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             add_test(NAME xrfg_frame_loop_${shape_name} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> frame-loop ${shape})
             set_tests_properties(xrfg_frame_loop_${shape_name} PROPERTIES TIMEOUT 60)
+        endforeach()
+        # Real presenter coverage of the sequence gate, both group orders and
+        # the D3D11 admission gate with retained repeats. SteamVR is a control.
+        foreach(shape "d3d12;interpolate;2" "d3d12;interpolate;3"
+                "d3d12;extrapolate;2" "d3d12;extrapolate;3"
+                "d3d11;interpolate;2" "d3d11;extrapolate;3"
+                "d3d11-steamvr;interpolate;2")
+            string(REPLACE ";" "_" shape_name "${shape}")
+            add_test(NAME xrfg_release_phase_${shape_name} COMMAND xrfg_layer_manual_disarm_tests
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> release-phase ${shape})
+            set_tests_properties(xrfg_release_phase_${shape_name} PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
         endforeach()
         # A frame-generation setting changed from the tray while the SteamVR
         # presenter runs with frames queued.
