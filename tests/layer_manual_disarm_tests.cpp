@@ -41,7 +41,7 @@ std::array<std::size_t, 2> marker_pixels(
 struct FinishedEarly {};
 
 int main(int argc, char** argv) {
-    if (argc < 3 || argc > 6) return 1;
+    if (argc < 3 || argc > 7) return 1;
     const std::string mode = argv[2];
     // These runs count pairs and switches; a frame rate shaped by Sleep
     // must not read as hitches to the synthesizer's rule.
@@ -63,8 +63,15 @@ int main(int argc, char** argv) {
     // single-threaded session that had the presenter moves its loop to
     // another thread, and the presenter a pass-through stopped comes back.
     //
-    const bool release_phase_test = mode == "release-phase";
-    if (release_phase_test && argc != 6) return 1;
+    const bool cadence_test = mode == "release-cadence";
+    const bool release_phase_test = mode == "release-phase" || cadence_test;
+    if (release_phase_test && argc != (cadence_test ? 7 : 6)) return 1;
+    const std::string cadence_shape = cadence_test ? argv[6] : "";
+    if (cadence_test && cadence_shape != "fast" && cadence_shape != "loaded" &&
+        cadence_shape != "shallow" && cadence_shape != "shallow-loaded" &&
+        cadence_shape != "restart") return 1;
+    bool cadence_loaded = cadence_shape == "loaded" || cadence_shape == "shallow-loaded" || cadence_shape == "restart";
+    const bool cadence_shallow = cadence_shape == "shallow" || cadence_shape == "shallow-loaded";
     const bool phase_d3d11 = release_phase_test && std::string(argv[3]).starts_with("d3d11");
     const bool phase_steamvr = release_phase_test && std::string(argv[3]) == "d3d11-steamvr";
     const bool phase_extrapolate = release_phase_test && std::string(argv[4]) == "extrapolate";
@@ -90,7 +97,7 @@ int main(int argc, char** argv) {
     // and submission at 3X round the game's frame up by a slot: 3X, then 2X
     // back (700 with c=4), and no third switch.
     g_paced_wait_mode = mode == "auto-frames-inline-paced" || (release_phase_test && !phase_steamvr);
-    if (frame_loop_test && argc != 5 && argc != 6) return 1;
+    if (frame_loop_test && argc != 5 && argc != 6 && !cadence_test) return 1;
     const std::string loop_runtime = release_phase_test ? "virtual-desktop" : frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
     const bool handoff_loop = frame_loop_test && std::string(argv[4]) == "handoff";
@@ -123,6 +130,7 @@ int main(int argc, char** argv) {
     HMODULE module = nullptr;
     HANDLE signal = nullptr;
     HANDLE pause_signal = nullptr;
+    HANDLE workload_timer = nullptr;
     XrInstance instance = XR_NULL_HANDLE;
     XrSession session = XR_NULL_HANDLE;
     XrSwapchain swapchain = XR_NULL_HANDLE;
@@ -135,12 +143,17 @@ int main(int argc, char** argv) {
     };
     int result = 1;
     try {
+        if (cadence_test) {
+            workload_timer = CreateWaitableTimerExW(nullptr, nullptr,
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            require(workload_timer != nullptr, "create precise cadence workload timer");
+        }
         std::filesystem::create_directories(root);
         const auto dll = root / L"OptiScaler.dll";
         std::filesystem::copy_file(argv[1], dll);
         signal = xrfg::implicit_layer::create_arm_signal(manifest);
         require(signal != nullptr, "create isolated arm signal");
-        if (pause_test || start_paused) {
+        if (pause_test || start_paused || cadence_shape == "restart") {
             pause_signal = xrfg::implicit_layer::create_pause_signal(manifest);
             require(pause_signal != nullptr, "create isolated pause signal");
         }
@@ -152,7 +165,8 @@ int main(int argc, char** argv) {
             std::ofstream ini(root / L"ofxr_bridge.ini");
             ini << "[ofxr]\nbackend=fidelityfx\ncontrol_event=" << ascii_control
                 << (auto_test ? "\nframes_auto=1" : "")
-                << (release_phase_test ? "\ndeep_pipeline=1\nd3d11_bridge=1\nsynthetic_pose=0" : "")
+                << (release_phase_test ? "\nd3d11_bridge=1\nsynthetic_pose=0" : "")
+                << (release_phase_test ? (cadence_shallow ? "\ndeep_pipeline=0" : "\ndeep_pipeline=1") : "")
                 << (phase_extrapolate ? "\nextrapolate=1" : "")
                 << (phase_triple ? "\ntriple_frame_gen=1" : "")
                 // The hand-off is read back from the flight log.
@@ -405,6 +419,19 @@ int main(int argc, char** argv) {
                 if (expect_native)
                     require(state.predictedDisplayPeriod == kFakeDisplayPeriod, what);
                 require(XR_SUCCEEDED(begin(session, nullptr)), what);
+                if (cadence_test) {
+                    // 14 ms is over one 10 ms slot, but comfortably inside
+                    // a 2X application's 20 ms render budget. A ready 4x4
+                    // synthetic must not turn that into a three-slot cycle.
+                    // Sleep(14) can take 25+ ms on the 15.6 ms system tick,
+                    // exceeding the render budget for reasons outside OFXR.
+                    LARGE_INTEGER due{};
+                    due.QuadPart = cadence_loaded ? (phase_triple ? -240'000LL : -140'000LL) : -20'000LL;
+                    require(SetWaitableTimer(workload_timer, &due, 0, nullptr, nullptr, FALSE) != FALSE,
+                            "schedule cadence workload");
+                    require(WaitForSingleObject(workload_timer, 1000) == WAIT_OBJECT_0,
+                            "cadence workload finished");
+                }
                 capture();
                 if (split_loop) {
                     std::exception_ptr failure;
@@ -427,6 +454,51 @@ int main(int argc, char** argv) {
             }
             // Past the thirty pairs the bunched-pair detector needs.
             int presenter_at = -1;
+            if (cadence_test) {
+                const auto measure = [&] {
+                    for (int i = 0; i < 90; ++i) frame(false, "cadence warmup");
+                    constexpr unsigned samples = 330; // crosses the ten-window cooldown
+                    const auto slots_before = g_end_frame_calls.load();
+                    const auto synthetic_before = g_synthetic_release_calls.load();
+                    const auto started = std::chrono::steady_clock::now();
+                    for (unsigned i = 0; i < samples; ++i) {
+                        const auto period = frame(false, "cadence sample");
+                        require(period == kFakeDisplayPeriod * (phase_triple ? 3 : 2),
+                                "cadence sample stays on the presenter");
+                    }
+                    const auto elapsed = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - started).count();
+                    const auto slots = g_end_frame_calls.load() - slots_before;
+                    const auto synthetics = g_synthetic_release_calls.load() - synthetic_before;
+                    const auto expected_slots = samples * (phase_triple ? 3U : 2U);
+                    std::cout << "cadence " << argv[3] << ' ' << argv[4] << ' ' << argv[5]
+                              << "X " << cadence_shape << ": " << samples / elapsed
+                              << " app FPS, " << slots << '/' << expected_slots
+                              << " runtime slots, " << synthetics << " synthetic releases" << std::endl;
+                    require(synthetics >= samples * (phase_triple ? 2U : 1U) * 9 / 10,
+                            "cadence must come from generated images, not generation bypass");
+                    require(slots <= expected_slots * 11 / 10,
+                            "ready groups must not spend an extra display slot repeating");
+                    require(elapsed < expected_slots * (kFakeDisplayPeriod / 1e9) * 1.25,
+                            "ready groups sustain their configured cadence");
+                };
+                measure();
+                if (cadence_shape == "restart") {
+                    require(SetEvent(pause_signal) != FALSE, "pause cadence");
+                    // The first wait can still carry the old period; the
+                    // begin/end boundary observes Pause and drains the presenter.
+                    frame(false, "pause cadence boundary");
+                    const auto paused_synthetics = g_synthetic_release_calls.load();
+                    for (int i = 0; i < 8; ++i) frame(true, "paused cadence frame");
+                    require(g_synthetic_release_calls.load() == paused_synthetics,
+                            "restart test actually stopped generation");
+                    cadence_loaded = false; // recover to a lighter workload after restart
+                    require(ResetEvent(pause_signal) != FALSE, "resume cadence");
+                    measure();
+                }
+                result = 0;
+                throw FinishedEarly{};
+            }
             for (int i = 0; i < (release_phase_test ? 140 : 45); ++i) {
                 const XrDuration period = frame(false, "generating frame");
                 if (presenter_at < 0 && period == kFakeDisplayPeriod * (phase_triple ? 3 : 2)) presenter_at = i;
@@ -871,6 +943,7 @@ int main(int argc, char** argv) {
     if (module) FreeLibrary(module);
     if (signal) CloseHandle(signal);
     if (pause_signal) CloseHandle(pause_signal);
+    if (workload_timer) CloseHandle(workload_timer);
     std::error_code ignored;
     if (root.is_absolute() && root.filename().wstring().starts_with(L"ofxr-disarm-")) std::filesystem::remove_all(root, ignored);
     if (!result) std::cout << "Live Disarm: " << mode << " passed\n";

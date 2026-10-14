@@ -855,6 +855,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> release-phase ${shape})
             set_tests_properties(xrfg_release_phase_${shape_name} PROPERTIES TIMEOUT 45 RUN_SERIAL TRUE)
         endforeach()
+        # Cadence assertions, not just completed frames: release 37 passed the
+        # readiness-window tests while turning a 2X deep pair into three slots.
+        foreach(shape "d3d12;interpolate;2;fast" "d3d12;interpolate;2;loaded"
+                "d3d12;interpolate;2;shallow" "d3d12;interpolate;2;restart"
+                "d3d12;interpolate;2;shallow-loaded" "d3d12;extrapolate;2;loaded"
+                "d3d12;extrapolate;2;fast" "d3d12;interpolate;3;fast"
+                "d3d12;interpolate;3;loaded"
+                "d3d11;interpolate;2;loaded")
+            string(REPLACE ";" "_" shape_name "${shape}")
+            add_test(NAME xrfg_release_cadence_${shape_name} COMMAND xrfg_layer_manual_disarm_tests
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> release-cadence ${shape})
+            set_tests_properties(xrfg_release_cadence_${shape_name} PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE)
+        endforeach()
         # A frame-generation setting changed from the tray while the SteamVR
         # presenter runs with frames queued.
         add_test(NAME xrfg_layer_steamvr_live_switch COMMAND xrfg_layer_manual_disarm_tests

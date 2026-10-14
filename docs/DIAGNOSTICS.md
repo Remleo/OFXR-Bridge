@@ -28,7 +28,7 @@ process may have stopped before recorder initialization.
 The recorder does not capture video and is not a replacement for a native
 crash dump. Game logs and crash dumps remain useful when available.
 
-## Adaptive presenter release (release 37 / upstream V452)
+## Adaptive presenter release (release 38 / upstream V452)
 
 On non-SteamVR runtimes, `presenter_transition` with `result=802` reports one
 window of 30 generated groups. A group is one application's submissions in
@@ -37,21 +37,32 @@ synthetic(s) for extrapolation.
 
 | Field | Meaning |
 |---|---|
-| `a` | Release depth in display slots before the group's last submission; 0 is the last, up to 1 at 2X or 2 at 3X |
+| `a` | Release depth in display slots before the group's last submission; 0 is the last. Bounds are 0–1 at ordinary 2X, 1–2 for deep 2X interpolation, and 0–2 at 3X |
 | `b & 0xffff` | Groups whose first actual synthetic was unwritten at its pop or held for that reason |
-| `b >> 16` | Groups where the following group's first synthetic was already written when the current group's last submission popped |
+| `(b >> 16) & 0xffff` | Groups where the following group's first synthetic was already written and old enough for the pipeline when the current group's last submission popped |
+| `(b >> 32) & 0xffff` | Groups whose first synthetic was held for minimum queue age (added in release 38) |
+| `(b >> 48) & 0xffff` | Groups arriving after the presenter had to repeat an image because no next group was queued (added in release 38) |
 | `c & 0xff` | Step: 0 unchanged, 1 release earlier, 2 release later |
 | `c >> 8` | Maximum permitted depth |
 
-Two or more unwritten leaders move release one slot earlier. Moving back
-requires a window with no unwritten leaders, all 30 following leaders ready
+Two or more groups delayed by queue age, unwritten output, or late arrival
+move release one slot earlier. A group affected by several causes counts once.
+Moving back requires a window with none of these delays, all 30 following leaders ready and eligible
 early, and expiration of the ten-window cooldown. The learned depth survives
 presenter restarts and is clamped when switching between 2X and 3X.
 
+Deep 2X interpolation reserves one release slot for its minimum queue age.
+It can release one additional slot earlier when the application needs more
+than one display period to render. Without that allowance, a ready pair can
+occupy three slots instead of two. Shallow and real-first extrapolation
+groups do not reserve this extra slot.
+
 For `presenter_pair_release`, `a` is the wait in microseconds. On non-SteamVR,
 `b` is the most recently popped submission sequence, `c` the target sequence,
-and `result` the surplus beyond the target. At admission the target belongs
-to the previous queued group; after enqueue it belongs to the new group.
+and `result` the surplus beyond the target. At admission the anchor is the
+previous queued group; after enqueue it is the new group. Deep interpolation
+can target the submission immediately before its anchor's first submission;
+that submission has already been queued as well.
 A repeated image cannot advance that sequence. A prime waits for its own pop.
 
 SteamVR keeps its existing serial-based `presenter_pair_release` fields and

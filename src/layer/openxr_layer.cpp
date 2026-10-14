@@ -1536,6 +1536,9 @@ struct SessionState {
     xrfg::PresenterReleasePhase release_phase;
     std::uint64_t presenter_popped_sequence{};
     std::uint64_t release_group_first{}, release_group_last{};
+    // A completed generated group was followed by an empty display slot.
+    // Charge that arrival miss once to the next group, under presenter_mutex.
+    bool release_group_expected{}, release_group_starved{};
     // The application's thread only.
     HANDLE application_release_timer{};
     // A condition variable waits on the system tick, which is 15.6 ms by
@@ -8589,7 +8592,7 @@ struct PendingPrivateRelease {
     PrivateSwapchainState& image) noexcept;
 
 struct ReleaseGroupReadiness {
-    bool judged{}, unwritten{};
+    bool judged{}, unwritten{}, age_held{}, starved{};
 };
 
 struct GeneratedFrameEndInfo {
@@ -9187,21 +9190,30 @@ void judge_release_readiness(GeneratedFrameEndInfo& frame) noexcept {
 bool release_leader_ready(const SessionState& state) noexcept {
     // Extrapolation puts a real frame before the first synthetic.
     for (const auto& request : state.presenter_submissions) {
-        if (request->owned_frame && request->owned_frame->release_leader)
-            return synthetic_output_ready(*request->owned_frame);
+        if (request->owned_frame && request->owned_frame->release_leader) {
+            // Releasing a slot later also removes a slot of queue age.
+            // A written but too-young image is not early enough to do that.
+            const auto age = std::chrono::steady_clock::now() - request->queued_at;
+            return (!state.deep_pipeline || age >= std::chrono::nanoseconds(
+                        static_cast<std::int64_t>(state.presenter_display_period))) &&
+                   synthetic_output_ready(*request->owned_frame);
+        }
         if (!request->owned_frame || request->owned_frame->release_group_end)
             break;
     }
     return false;
 }
 
-// 802: a depth in slots before the group end; b unwritten | early << 16;
+// 802: a depth before the group end; b four 16-bit group counts:
+// unwritten, early, age-held, and late arrival (starved).
 // c step (0 hold, 1 earlier, 2 later) | maximum depth << 8. Non-SteamVR only.
 void log_release_phase(const xrfg::PresenterReleasePhase::Report& report) noexcept {
     if (!report.due) return;
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition, 802, report.depth,
-        report.unwritten | (static_cast<std::uint64_t>(report.early) << 16),
+        report.unwritten | (static_cast<std::uint64_t>(report.early) << 16) |
+            (static_cast<std::uint64_t>(report.age_held) << 32) |
+            (static_cast<std::uint64_t>(report.starved) << 48),
         report.step | (static_cast<std::uint64_t>(report.maximum) << 8));
 }
 
@@ -9923,6 +9935,13 @@ void continuous_presenter_main(
                         held_sequence = front->sequence;
                         held_reason = too_young ? 400 : 401;
                         repeated_frame = state->presenter_last_frame;
+                        if (too_young && !state->dispatch->steamvr_runtime &&
+                            front->owned_frame->release_leader &&
+                            front->owned_frame->release_readiness) {
+                            // Count once per group even if several slots are
+                            // held. Judge GPU readiness later, at eligibility.
+                            front->owned_frame->release_readiness->age_held = true;
+                        }
                         if (not_written && !state->dispatch->steamvr_runtime)
                             judge_release_readiness(*front->owned_frame);
                     } else {
@@ -9936,6 +9955,10 @@ void continuous_presenter_main(
                         request = front;
                         state->presenter_submissions.pop_front();
                         state->presenter_popped_sequence = request->sequence;
+                        if (!state->dispatch->steamvr_runtime) {
+                            state->release_group_expected = request->owned_frame &&
+                                request->owned_frame->release_group_end;
+                        }
                         if (!state->dispatch->steamvr_runtime && request->owned_frame) {
                             auto& frame = *request->owned_frame;
                             judge_release_readiness(frame);
@@ -9944,7 +9967,9 @@ void continuous_presenter_main(
                                 phase_report = state->release_phase.observe(
                                     frame.release_readiness->unwritten,
                                     release_leader_ready(*state),
-                                    state->frames_per_application_frame.load());
+                                    state->frames_per_application_frame.load(),
+                                    frame.release_readiness->age_held,
+                                    frame.release_readiness->starved);
                             }
                         }
                         // Keep SteamVR's existing 3X delay and rephasing.
@@ -9966,6 +9991,12 @@ void continuous_presenter_main(
                     }
                 } else if (!state->presenter_stop_requested) {
                     repeated_frame = state->presenter_last_frame;
+                    if (!state->dispatch->steamvr_runtime && repeated_frame &&
+                        state->release_group_expected) {
+                        // CPU-late groups can be fully written by their pop.
+                        // Readiness alone would miss the slot already lost.
+                        state->release_group_starved = true;
+                    }
                 }
             }
             // Recorded outside presenter_mutex, which the application waits
@@ -11106,6 +11137,7 @@ void continuous_presenter_main(
         state->next_presenter_sequence = 1;
         state->presenter_popped_sequence = 0;
         state->release_group_first = state->release_group_last = 0;
+        state->release_group_expected = state->release_group_starved = false;
         state->release_phase.reset_window(state->frames_per_application_frame.load());
         state->outstanding_presenter_submissions = 0;
         if (state->pipelined_presenter_mode && seed_frame) {
@@ -11515,6 +11547,7 @@ enqueue_presenter_submission(
         }
         request->sequence = state->next_presenter_sequence++;
         state->release_group_first = state->release_group_last = request->sequence;
+        state->release_group_starved = false; // a prime is not a generated group
         request->owned_frame = std::move(owned_frame);
         request->borrowed_frame = borrowed_frame;
         request->queued_at = std::chrono::steady_clock::now();
@@ -11566,7 +11599,11 @@ enqueue_presenter_submission(
                 : XR_ERROR_SESSION_NOT_RUNNING;
         }
         if (!state->dispatch->steamvr_runtime && synthetic && current) {
+            state->release_phase.set_age_guard(
+                state->deep_pipeline && synthetic->synthetic,
+                state->frames_per_application_frame.load());
             auto readiness = std::make_shared<ReleaseGroupReadiness>();
+            readiness->starved = std::exchange(state->release_group_starved, false);
             bool found_leader = false;
             for (const auto& frame : {synthetic, extra_synthetic, current}) {
                 if (frame && frame->synthetic && !frame->repeats_current) {
