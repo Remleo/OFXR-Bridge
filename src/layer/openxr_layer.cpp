@@ -65,15 +65,26 @@ namespace {
 // give two streams each other's eyes, and until a decision the eyes take each
 // other's guides. Each decision goes to the NGX capture log, always, and to the
 // flight log when it records, with how long the deciding order had held and
-// how long the pair had been seen: the measure of what that wait costs. The
-// counts are exchanged on every call, zero included: tracking configured again
-// starts the statistics over, and the new run's first decision is logged too.
+// how long the pair had been seen: the measure of what that wait costs. A
+// decision is logged once, known by its count under the statistics'
+// generation: tracking configured again starts the counts over under a new
+// one, so a new run's first decision is logged too, and a call holding older
+// statistics than another's logs nothing.
 void note_dlss_eye_order() noexcept {
     static std::atomic<std::uint64_t> logged{0};
     static std::atomic<std::uint64_t> checks_logged{0};
     const auto statistics = xrfg::dlss_motion_vector_statistics();
+    // The generation in the high half, the count in the low: neither nears 2^32.
+    const auto first_time = [&](std::atomic<std::uint64_t>& seen, std::uint64_t count) {
+        const std::uint64_t key = (statistics.generation << 32) | count;
+        std::uint64_t last = seen.load(std::memory_order_relaxed);
+        while (count != 0 && last < key) {
+            if (seen.compare_exchange_weak(last, key, std::memory_order_relaxed)) return true;
+        }
+        return false;
+    };
     const std::uint64_t decisions = statistics.eye_order_decisions;
-    if (logged.exchange(decisions) != decisions && decisions != 0) {
+    if (first_time(logged, decisions)) {
         xrfg::log_ngx_guide_event("eye_order", statistics.eye_order_stream,
             statistics.eye_order_run_ms, statistics.eye_order_pair_ms, decisions);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_eye_order,
@@ -81,7 +92,7 @@ void note_dlss_eye_order() noexcept {
             statistics.eye_order_run_ms, statistics.eye_order_pair_ms);
     }
     const std::uint64_t checks = statistics.eye_check_decisions;
-    if (checks_logged.exchange(checks) != checks && checks != 0) {
+    if (first_time(checks_logged, checks)) {
         xrfg::log_ngx_guide_event("eye_check", statistics.eye_check_stream,
             statistics.eye_check_pair_ms, 0, checks);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_eye_check,

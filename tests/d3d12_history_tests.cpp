@@ -3604,10 +3604,22 @@ void test_dlss_motion_vector_evaluation_order(D3D12WarpFixture& fixture) {
         require(settled.eye_order_decisions == 4 && settled.eye_order_stream == 101,
             "the orders settled with and against the images' word were not counted");
     }
+    // Starting over restarts the counts under a new generation, either way it
+    // happens: the eye-order log keys a count on it.
+    const std::uint64_t generation = xrfg::dlss_motion_vector_statistics().generation;
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(101);
     xrfg::retire_dlss_motion_vector_stream(202);
+    xrfg::retire_disabled_dlss_motion_vector_resources();
+    require(xrfg::dlss_motion_vector_statistics().generation == generation + 1,
+        "retiring the disabled tracking's resources did not start a new generation");
     xrfg::configure_dlss_motion_vector_tracking(true);
+    {
+        const auto restarted = xrfg::dlss_motion_vector_statistics();
+        require(restarted.generation == generation + 2 &&
+                restarted.eye_order_decisions == 0 && restarted.eye_check_decisions == 0,
+            "tracking configured again did not restart the counts under a new generation");
+    }
 }
 
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {

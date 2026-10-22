@@ -190,6 +190,10 @@ struct DlssMotionVectorStatistics {
     std::uint64_t eye_check_decisions{}, eye_check_stream{}, eye_check_pair_ms{};
     // Output tiles copied for that check.
     std::uint64_t tile_copies{};
+    // How many times the counts above have started over (tracking configured
+    // again, or its resources retired): a reader that remembers a count keys
+    // it on this too. Internal only.
+    std::uint64_t generation{};
 };
 
 void publish_dlss_motion_vectors(

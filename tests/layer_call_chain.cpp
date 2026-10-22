@@ -3129,9 +3129,9 @@ int main(int argc, char** argv) {
             passthrough_base,
         };
         // two-quads-split-eye: a second quad ahead of the first, on the same
-        // swapchain and a rectangle of its own.
+        // swapchain and a rectangle of its own, the right half.
         XrCompositionLayerQuad second_quad = passthrough_quad;
-        second_quad.subImage.imageRect.offset = {0, 4};
+        second_quad.subImage.imageRect = {{2, 0}, {2, 4}};
         const XrCompositionLayerBaseHeader* two_quad_layers[] = {
             all_layers[0],
             all_layers[1],

@@ -607,7 +607,9 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
         }
         state.order = {};
         state.burst_started_ms = state.burst_until_ms = 0;
+        const std::uint64_t generation = state.statistics.generation + 1;
         state.statistics = {};
+        state.statistics.generation = generation;
         state.statistics.status = DlssMotionVectorStatus::waiting_for_dlss;
     } catch (...) {
     }
@@ -621,7 +623,9 @@ void retire_disabled_dlss_motion_vector_resources() noexcept {
         state.streams.clear();
         state.order = {};
         state.burst_started_ms = state.burst_until_ms = 0;
+        const std::uint64_t generation = state.statistics.generation + 1;
         state.statistics = {};
+        state.statistics.generation = generation;
         state.statistics.status = DlssMotionVectorStatus::disabled;
     } catch (...) {
     }
