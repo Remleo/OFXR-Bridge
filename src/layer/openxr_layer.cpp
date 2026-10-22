@@ -643,10 +643,21 @@ struct ProjectionLayerSnapshot {
     std::vector<XrCompositionLayerProjectionView> views;
 };
 
+// A quad or cylinder layer's place in the frame: what a synthetic needs to show
+// it where it was at the synthetic's own time (synthetic_camera_snapshot).
+struct PlacedLayerSnapshot {
+    std::uint32_t layer_index{};
+    XrStructureType type{};
+    XrSpace space{XR_NULL_HANDLE};
+    XrSwapchain swapchain{XR_NULL_HANDLE};
+    XrPosef pose{};
+};
+
 struct ProjectionSnapshot {
     XrTime display_time{};
     XrEnvironmentBlendMode environment_blend_mode{};
     std::vector<ProjectionLayerSnapshot> layers;
+    std::vector<PlacedLayerSnapshot> placed_layers;
 };
 
 struct ProjectionViewReference {
@@ -8614,6 +8625,11 @@ struct GeneratedFrameEndInfo {
     XrFrameEndInfo info{XR_TYPE_FRAME_END_INFO};
     std::vector<ProjectionLayerCopy> projections;
     std::vector<OwnedCompositionLayer> composition_layers;
+    // A synthetic's quads and cylinders at its own time, which layer_pointers
+    // name in place of the application's (build_generated_frame_end_info).
+    // Reserved before the first is added, so those pointers hold; a move of
+    // the frame keeps the buffer.
+    std::vector<OwnedCompositionLayer> placed_copies;
     std::vector<const XrCompositionLayerBaseHeader*> layer_pointers;
     // Synthesizers whose current copy is recorded but not yet submitted.
     // Only the synthetic half of a pair carries these: the copy must reach
@@ -11673,6 +11689,15 @@ enqueue_presenter_submission(
     snapshot.environment_blend_mode = source->environmentBlendMode;
     for (std::uint32_t layer_index = 0; layer_index < source->layerCount; ++layer_index) {
         const XrCompositionLayerBaseHeader* layer = source->layers[layer_index];
+        if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+            const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+            snapshot.placed_layers.push_back({layer_index, layer->type, quad->space,
+                quad->subImage.swapchain, quad->pose});
+        } else if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {
+            const auto* cylinder = reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
+            snapshot.placed_layers.push_back({layer_index, layer->type, cylinder->space,
+                cylinder->subImage.swapchain, cylinder->pose});
+        }
         if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             continue;
         }
@@ -12223,6 +12248,46 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
                 };
             }
         }
+        // A quad or cylinder the application moves from frame to frame - a
+        // reticle placed in the world where a controller aims, say - goes the
+        // same share of the way. Resubmitted with the newer frame's pose, it
+        // stood at that pose through every synthetic while the world was
+        // drawn part of the way there, so it moved in steps at the game's
+        // frame rate and led the scene by a frame: from the headset, a jerky
+        // reticle over a smooth world (STALKER 2 under UEVR, whose reticle is a
+        // stage-space quad). One whose space, image or kind changed, or that
+        // turned or moved more than a head does in a frame, keeps the newer
+        // pose, as the views do; so does one with no counterpart.
+        for (PlacedLayerSnapshot& placed : camera.placed_layers) {
+            const auto previous_placed = std::find_if(
+                previous.placed_layers.begin(),
+                previous.placed_layers.end(),
+                [&](const PlacedLayerSnapshot& candidate) {
+                    return candidate.type == placed.type &&
+                           candidate.space == placed.space &&
+                           candidate.swapchain == placed.swapchain;
+                });
+            if (previous_placed == previous.placed_layers.end()) {
+                continue;
+            }
+            const xrfg::Pose from = to_pose(previous_placed->pose);
+            const xrfg::Pose to = to_pose(placed.pose);
+            const float move_x = to.position.x - from.position.x;
+            const float move_y = to.position.y - from.position.y;
+            const float move_z = to.position.z - from.position.z;
+            const float turn = xrfg::rotation_angle(from.orientation, to.orientation);
+            const float move = std::sqrt(move_x * move_x + move_y * move_y + move_z * move_z);
+            if (!(turn <= kMaxSyntheticCameraTurnRadians) ||
+                !(move <= kMaxSyntheticCameraMoveMeters)) {
+                continue;
+            }
+            const xrfg::Pose shown = xrfg::pose_at_fraction(from, to, fraction);
+            placed.pose = {
+                {shown.orientation.x, shown.orientation.y, shown.orientation.z,
+                 shown.orientation.w},
+                {shown.position.x, shown.position.y, shown.position.z},
+            };
+        }
         return camera;
     } catch (...) {
         return std::nullopt;
@@ -12307,6 +12372,46 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
         const auto* stored_header =
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(&stored.layer);
         output->layer_pointers[metadata.layer_index] = stored_header;
+    }
+    // A synthetic's quads and cylinders at the synthetic's own time
+    // (synthetic_camera_snapshot). Only those whose pose moved are copied:
+    // the rest go as the application submitted them.
+    if (synthetic && camera != nullptr && !camera->placed_layers.empty()) {
+        output->placed_copies.clear();
+        output->placed_copies.reserve(camera->placed_layers.size());
+        for (const PlacedLayerSnapshot& placed : camera->placed_layers) {
+            if (placed.layer_index >= output->layer_pointers.size()) {
+                continue;
+            }
+            const XrCompositionLayerBaseHeader* layer =
+                output->layer_pointers[placed.layer_index];
+            if (layer == nullptr || layer->type != placed.type) {
+                continue;
+            }
+            const auto same_pose = [&](const XrPosef& pose) {
+                return std::memcmp(&pose, &placed.pose, sizeof(XrPosef)) == 0;
+            };
+            if (placed.type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+                XrCompositionLayerQuad copy = *reinterpret_cast<const XrCompositionLayerQuad*>(layer);
+                if (copy.subImage.swapchain != placed.swapchain || same_pose(copy.pose)) {
+                    continue;
+                }
+                copy.pose = placed.pose;
+                output->placed_copies.emplace_back(copy);
+            } else if (placed.type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {
+                XrCompositionLayerCylinderKHR copy =
+                    *reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
+                if (copy.subImage.swapchain != placed.swapchain || same_pose(copy.pose)) {
+                    continue;
+                }
+                copy.pose = placed.pose;
+                output->placed_copies.emplace_back(copy);
+            } else {
+                continue;
+            }
+            output->layer_pointers[placed.layer_index] =
+                composition_layer_header(output->placed_copies.back());
+        }
     }
     output->info.layerCount =
         static_cast<std::uint32_t>(output->layer_pointers.size());
