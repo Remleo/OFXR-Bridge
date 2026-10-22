@@ -4,14 +4,17 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/third_party/uevr_api.h"
 #include <windows.h>
+#include <psapi.h>
 #include <wrl/client.h>
 #include <nvsdk_ngx_params.h>
 #include <safetyhook.hpp>
 #include <d3d12sdklayers.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
 #include <cmath>
+#include <cwctype>
 #include <share.h>
 #include <mutex>
 #include <string>
@@ -241,9 +244,35 @@ template<UINT slot> NVSDK_NGX_Result evaluate(ID3D12GraphicsCommandList* list,
     if(NVSDK_NGX_SUCCEED(result)) { try { capture(list,h,p); } catch(...) {log("capture_exception");} }
     return result;
 }
-void install(UINT i,const wchar_t* name,void* create_fn,void* eval_fn) {
+// A feature module NGX took from its own model store rather than the game's
+// folder. The driver's NGX keeps the newest model of each feature under
+// NGX\models\<feature>\versions\<n>\files\ and loads it from there by a file
+// name of its own: STALKER 2 ran DLSS 310.9.16 as 160_E658700.bin from
+// NGX\models\dlss\..., beside its own nvngx_dlss.dll 310.4, so a search by the
+// shipped name found nothing and no evaluation was ever seen. `folder` is the
+// feature's directory in that store (L"\\models\\dlss\\" for Super
+// Resolution, L"\\models\\dlssd\\" for Ray Reconstruction); the exports are
+// checked by the caller as for a module found by name.
+HMODULE find_store_module(const wchar_t* folder) {
+    std::vector<HMODULE> modules(512); DWORD needed{};
+    if(!K32EnumProcessModules(GetCurrentProcess(),modules.data(),
+        static_cast<DWORD>(modules.size()*sizeof(HMODULE)),&needed))return nullptr;
+    modules.resize(std::min<std::size_t>(modules.size(),needed/sizeof(HMODULE)));
+    std::wstring wanted=L"\\ngx"; wanted+=folder;
+    for(auto& c:wanted)c=static_cast<wchar_t>(towlower(c));
+    for(HMODULE module:modules) {
+        wchar_t path[MAX_PATH]{};
+        if(!GetModuleFileNameW(module,path,MAX_PATH))continue;
+        std::wstring lower=path; for(auto& c:lower)c=static_cast<wchar_t>(towlower(c));
+        if(lower.find(wanted)!=std::wstring::npos)return module;
+    }
+    return nullptr;
+}
+void install(UINT i,const wchar_t* name,const wchar_t* store_folder,void* create_fn,void* eval_fn) {
     auto& m=state().modules[i]; if(m.retained)return;
-    auto mod=GetModuleHandleW(name); if(!mod)return;
+    auto mod=GetModuleHandleW(name); const bool from_store=!mod;
+    if(!mod)mod=find_store_module(store_folder);
+    if(!mod)return;
     auto c=GetProcAddress(mod,"NVSDK_NGX_D3D12_CreateFeature");
     auto e=GetProcAddress(mod,"NVSDK_NGX_D3D12_EvaluateFeature"); if(!c||!e)return;
     HMODULE retained{}; if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
@@ -252,7 +281,8 @@ void install(UINT i,const wchar_t* name,void* create_fn,void* eval_fn) {
     m.evaluate_hook=safetyhook::create_inline(e,eval_fn,SafetyHookInline::StartDisabled);
     if(!m.create_hook||!m.evaluate_hook){FreeLibrary(retained);log("hook_failed",i);return;}
     m.create=m.create_hook.original<Create>(); m.evaluate=m.evaluate_hook.original<Evaluate>();
-    m.retained=retained; (void)m.create_hook.enable(); (void)m.evaluate_hook.enable(); log("hook_installed",i);
+    m.retained=retained; (void)m.create_hook.enable(); (void)m.evaluate_hook.enable();
+    log("hook_installed",i,from_store?1:0);
 }
 // NGX looks for a feature's module only along the path list of the process's
 // first initialisation, which is usually the game's own DLSS: OFXR's later
@@ -389,8 +419,10 @@ void configure_ngx_guide_capture(ID3D12CommandQueue* queue,bool enabled) noexcep
         // so that creation can precede the hook; capture() recovers it.
         std::thread([] {for(;;) {
             if(state().active) {
-                install(0,L"nvngx_dlss.dll",reinterpret_cast<void*>(&create<0>),reinterpret_cast<void*>(&evaluate<0>));
-                install(1,L"nvngx_dlssd.dll",reinterpret_cast<void*>(&create<1>),reinterpret_cast<void*>(&evaluate<1>));
+                install(0,L"nvngx_dlss.dll",L"\\models\\dlss\\",
+                    reinterpret_cast<void*>(&create<0>),reinterpret_cast<void*>(&evaluate<0>));
+                install(1,L"nvngx_dlssd.dll",L"\\models\\dlssd\\",
+                    reinterpret_cast<void*>(&create<1>),reinterpret_cast<void*>(&evaluate<1>));
                 if(state().modules[0].retained&&state().modules[1].retained)return;
             }
             Sleep(500);
