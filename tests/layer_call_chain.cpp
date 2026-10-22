@@ -106,6 +106,10 @@ bool g_cropped_subimage_mode = false;
 // from frame to frame, as a reticle placed where a controller aims is. A
 // synthetic must show the quad at its own share of the way, as its views.
 bool g_moving_quad_mode = false;
+// two-quads-split-eye: the same with a second quad on the same swapchain, a
+// different rectangle of it, moving the other way. Each must find its own
+// counterpart in the previous frame, not the other's.
+bool g_two_quads_mode = false;
 bool g_double_wide_mode = false;
 bool g_uevr_pipelined_display_time_mode = false;
 bool g_d3d11_interop_mode = false;
@@ -311,6 +315,8 @@ struct EndFrameRecord {
     std::uint32_t quad_layer_index{
         std::numeric_limits<std::uint32_t>::max()};
     XrPosef quad_pose{};
+    // Every quad's pose, in the frame's order.
+    std::vector<XrPosef> quad_poses;
 };
 
 struct LocateViewsRecord {
@@ -881,6 +887,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_frame(
                 record.quad_layer_index = layer_index;
                 record.quad_pose =
                     reinterpret_cast<const XrCompositionLayerQuad*>(layer)->pose;
+                record.quad_poses.push_back(record.quad_pose);
             }
             if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
                 continue;
@@ -2552,7 +2559,8 @@ int main(int argc, char** argv) {
     if (argc != 3 && argc != 4) {
         std::cerr <<
             "usage: xrfg_layer_call_chain <layer-dll> <log-path> "
-            "[split-eye|cropped-split-eye|moving-quad-split-eye|double-wide|d3d11-interop|"
+            "[split-eye|cropped-split-eye|moving-quad-split-eye|two-quads-split-eye|"
+            "double-wide|d3d11-interop|"
             "d3d11-double-wide|steamvr-inline|steamvr-presenter|"
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
@@ -2620,8 +2628,10 @@ int main(int argc, char** argv) {
     g_double_wide_mode = argc == 4 &&
         (std::strcmp(argv[3], "double-wide") == 0 ||
          d3d11_double_wide_mode || g_uevr_pipelined_display_time_mode);
-    g_moving_quad_mode =
-        argc == 4 && std::strcmp(argv[3], "moving-quad-split-eye") == 0;
+    g_two_quads_mode =
+        argc == 4 && std::strcmp(argv[3], "two-quads-split-eye") == 0;
+    g_moving_quad_mode = g_two_quads_mode ||
+        (argc == 4 && std::strcmp(argv[3], "moving-quad-split-eye") == 0);
     g_split_eye_mode = argc == 4 &&
         (std::strcmp(argv[3], "split-eye") == 0 || g_cropped_subimage_mode ||
          g_moving_quad_mode);
@@ -3118,11 +3128,22 @@ int main(int argc, char** argv) {
             all_layers[0],
             passthrough_base,
         };
+        // two-quads-split-eye: a second quad ahead of the first, on the same
+        // swapchain and a rectangle of its own.
+        XrCompositionLayerQuad second_quad = passthrough_quad;
+        second_quad.subImage.imageRect.offset = {0, 4};
+        const XrCompositionLayerBaseHeader* two_quad_layers[] = {
+            all_layers[0],
+            all_layers[1],
+            reinterpret_cast<const XrCompositionLayerBaseHeader*>(&second_quad),
+            passthrough_base,
+        };
         const XrCompositionLayerBaseHeader* const* layers =
-            one_layer ? one_layer_layers : all_layers;
+            one_layer ? one_layer_layers : g_two_quads_mode ? two_quad_layers : all_layers;
         const std::uint32_t layer_count = one_layer
             ? static_cast<std::uint32_t>(std::size(one_layer_layers))
-            : static_cast<std::uint32_t>(std::size(all_layers));
+            : g_two_quads_mode ? static_cast<std::uint32_t>(std::size(two_quad_layers))
+                               : static_cast<std::uint32_t>(std::size(all_layers));
 
         auto submit_frame = [&](XrTime display_time) {
             XrViewLocateInfo locate_info{XR_TYPE_VIEW_LOCATE_INFO};
@@ -3155,6 +3176,10 @@ int main(int argc, char** argv) {
                 const float half = static_cast<float>(display_time) * 0.0005F;
                 passthrough_quad.pose.orientation = {0.0F, std::sin(half), 0.0F, std::cos(half)};
                 passthrough_quad.pose.position.x = static_cast<float>(display_time) * 0.001F;
+                // The second quad the other way: the same turn and move,
+                // negated.
+                second_quad.pose.orientation = {0.0F, -std::sin(half), 0.0F, std::cos(half)};
+                second_quad.pose.position.x = -static_cast<float>(display_time) * 0.001F;
             }
             XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
             frame_end_info.displayTime = display_time;
@@ -3287,14 +3312,30 @@ int main(int argc, char** argv) {
                    nearly_equal(pose.orientation.w, std::cos(half)) &&
                    nearly_equal(pose.position.x, time * 0.001F);
         };
+        // two-quads-split-eye: the second quad, first in the frame, at its own
+        // share of its own way, the other way from the first.
+        const auto second_quad_at = [&](std::size_t index, float time) {
+            if (index >= end_records.size() || end_records[index].quad_poses.size() != 2) {
+                return false;
+            }
+            const XrPosef& pose = end_records[index].quad_poses[0];
+            const float half = time * 0.0005F;
+            return nearly_equal(pose.orientation.y, -std::sin(half)) &&
+                   nearly_equal(pose.orientation.w, std::cos(half)) &&
+                   nearly_equal(pose.position.x, -time * 0.001F);
+        };
         const bool synthetic_quad_copied = g_moving_quad_mode && g_synthetic_pose_interpolated;
         // The copy keeps the application's layer's place in the frame.
         const bool quads_valid = !g_moving_quad_mode ||
             (quad_at(1, 200.0F) &&
              quad_at(2, g_synthetic_pose_interpolated ? 250.0F : 300.0F) &&
              quad_at(3, 300.0F) && end_records.size() > 2 &&
-             end_records[2].quad_layer_count == 1 &&
-             end_records[2].quad_layer_index == layer_count - 1);
+             end_records[2].quad_layer_count == (g_two_quads_mode ? 2U : 1U) &&
+             end_records[2].quad_layer_index == layer_count - 1 &&
+             (!g_two_quads_mode ||
+                 (second_quad_at(1, 200.0F) &&
+                  second_quad_at(2, g_synthetic_pose_interpolated ? 250.0F : 300.0F) &&
+                  second_quad_at(3, 300.0F))));
         if (!quads_valid) {
             std::cerr << "moving-quad-split-eye: the synthetic's quad is not at its share of the way\n";
         }
@@ -3349,6 +3390,8 @@ int main(int argc, char** argv) {
         }
         std::cout << (g_cropped_subimage_mode
                           ? "OpenXR cropped split-eye fake-runtime call-chain test passed\n"
+                          : g_two_quads_mode
+                                ? "OpenXR two-quads split-eye fake-runtime call-chain test passed\n"
                           : g_moving_quad_mode
                                 ? "OpenXR moving-quad split-eye fake-runtime call-chain test passed\n"
                                 : "OpenXR split-eye fake-runtime call-chain test passed\n");

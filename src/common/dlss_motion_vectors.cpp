@@ -83,8 +83,11 @@ struct EvaluationOrder {
     // The stream the images themselves showed to be eye 0
     // (report_dlss_eye_order_check), 0 until they have. It outranks the
     // order: the images are the thing itself, the order a sign of it. Kept
-    // until the pair changes or the images say otherwise - the check reads
-    // every pair, so a swap reaches it long before the order has held.
+    // until the pair changes, the images say otherwise, or the order settles
+    // against it. A change of order opens an eye-check burst at once, so the
+    // images usually answer before the new order has held; where they cannot -
+    // a dark loading screen after the level load that turned the features
+    // round - the order that has since held is the newer word.
     std::uint64_t checked{};
 };
 
@@ -386,6 +389,7 @@ std::uint64_t learn_evaluation_order(Registry& state,
     }
     if (order.run >= kEvaluationOrderFrames && order.leader != first) {
         order.leader = first;
+        if (order.checked != 0 && order.checked != first) order.checked = 0;
         auto& statistics = state.statistics;
         ++statistics.eye_order_decisions;
         statistics.eye_order_stream = first;

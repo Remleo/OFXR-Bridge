@@ -963,6 +963,13 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 moving-quad-split-eye)
 
         add_test(
+            NAME xrfg_layer_two_quads_call_chain
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-two-quads-call-chain-test.log"
+                two-quads-split-eye)
+
+        add_test(
             NAME xrfg_layer_double_wide_call_chain
             COMMAND xrfg_layer_call_chain
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>

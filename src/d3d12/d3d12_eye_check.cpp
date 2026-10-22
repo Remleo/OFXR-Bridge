@@ -133,6 +133,7 @@ void D3D12EyeCheck::record(ID3D12GraphicsCommandList* list, UINT slot_index,
     ID3D12Resource* image, std::span<const D3D12ReprojectionView> views,
     const DlssMotionVectorSet& set) noexcept {
     try {
+        poll();
         if (!list || !image || !root_ || slot_index >= kSlots || views.size() != 2 ||
             set.eye_count != 2 || !set.eyes[0] || !set.eyes[1]) return;
         const auto& a = *set.eyes[0];
@@ -180,6 +181,9 @@ void D3D12EyeCheck::record(ID3D12GraphicsCommandList* list, UINT slot_index,
         p.output_size[3] = b.output_height;
 
         Slot& slot = slots_[slot_index];
+        // Still on the GPU, as the read above left it: its result is not
+        // written yet. One recorded but never submitted is free to take.
+        if (slot.recorded && slot.fence) return;
         auto cpu = slot.heap->GetCPUDescriptorHandleForHeapStart();
         const auto next = [&] { auto h = cpu; cpu.ptr += increment_; return h; };
         D3D12_SHADER_RESOURCE_VIEW_DESC image_view{};
@@ -233,6 +237,7 @@ void D3D12EyeCheck::record(ID3D12GraphicsCommandList* list, UINT slot_index,
         slot.eye1_stream = b.stream;
         slot.fence.Reset();
         slot.value = 0;
+        slot.sequence = ++next_sequence_;
         slot.recorded = true;
     } catch (...) {
     }
@@ -248,49 +253,67 @@ void D3D12EyeCheck::submitted(UINT slot_index, ID3D12Fence* fence, std::uint64_t
 
 void D3D12EyeCheck::poll() noexcept {
     try {
+        // Slots are taken by the caller's work slot, not in turn, so the
+        // finished ones are read by when they were recorded: a run is a run
+        // of pairs in the order they happened.
+        std::array<Slot*, kSlots> finished{};
+        std::size_t count = 0;
         for (auto& slot : slots_) {
-            if (!slot.recorded || !slot.fence || slot.fence->GetCompletedValue() < slot.value) continue;
-            slot.recorded = false;
-            const D3D12_RANGE range{0, kResultBytes};
-            void* mapped = nullptr;
-            if (FAILED(slot.staging->Map(0, &range, &mapped)) || mapped == nullptr) continue;
-            float f[kResultFloats]{};
-            std::copy_n(static_cast<const float*>(mapped), kResultFloats, f);
-            const D3D12_RANGE nothing{0, 0};
-            slot.staging->Unmap(0, &nothing);
-            ++report_.compared;
-            // f[0..3]: the correlation of view 0 with A, view 0 with B, view 1
-            // with A, view 1 with B; f[4..7] the image's variance in each;
-            // f[8..9] the tiles'. A is eye 0's stream as resolved, B eye 1's.
-            bool finite = true;
-            for (const float value : f) finite = finite && std::isfinite(value);
-            const bool flat = f[4] < kMinimumVariance || f[5] < kMinimumVariance ||
-                f[6] < kMinimumVariance || f[7] < kMinimumVariance ||
-                f[8] < kMinimumVariance || f[9] < kMinimumVariance;
-            if (!finite || flat) continue;
-            const float same = f[0] + f[3];
-            const float swapped = f[1] + f[2];
-            report_.same = same;
-            report_.swapped = swapped;
-            if (swapped - same > kMargin) {
-                same_votes_ = 0;
-                if (++swap_votes_ >= kVotes) {
-                    swap_votes_ = 0;
-                    ++report_.decided;
-                    ++report_.swaps;
-                    report_dlss_eye_order_check(slot.eye1_stream, slot.eye0_stream);
-                }
-            } else if (same - swapped > kMargin) {
-                swap_votes_ = 0;
-                if (++same_votes_ >= kVotes) {
-                    same_votes_ = 0;
-                    ++report_.decided;
-                    report_dlss_eye_order_check(slot.eye0_stream, slot.eye1_stream);
-                }
+            if (slot.recorded && slot.fence && slot.fence->GetCompletedValue() >= slot.value) {
+                finished[count++] = &slot;
             }
         }
+        std::sort(finished.begin(), finished.begin() + count,
+            [](const Slot* a, const Slot* b) { return a->sequence < b->sequence; });
+        for (std::size_t index = 0; index < count; ++index) read(*finished[index]);
     } catch (...) {
     }
+}
+
+void D3D12EyeCheck::read(Slot& slot) noexcept {
+    slot.recorded = false;
+    const D3D12_RANGE range{0, kResultBytes};
+    void* mapped = nullptr;
+    if (FAILED(slot.staging->Map(0, &range, &mapped)) || mapped == nullptr) return;
+    float f[kResultFloats]{};
+    std::copy_n(static_cast<const float*>(mapped), kResultFloats, f);
+    const D3D12_RANGE nothing{0, 0};
+    slot.staging->Unmap(0, &nothing);
+    ++report_.compared;
+    // f[0..3]: the correlation of view 0 with A, view 0 with B, view 1 with A,
+    // view 1 with B; f[4..7] the image's variance in each; f[8..9] the tiles'.
+    // A is eye 0's stream as resolved, B eye 1's.
+    bool finite = true;
+    for (const float value : f) finite = finite && std::isfinite(value);
+    const bool flat = f[4] < kMinimumVariance || f[5] < kMinimumVariance ||
+        f[6] < kMinimumVariance || f[7] < kMinimumVariance ||
+        f[8] < kMinimumVariance || f[9] < kMinimumVariance;
+    if (!finite || flat) return;
+    const float same = f[0] + f[3];
+    const float swapped = f[1] + f[2];
+    report_.same = same;
+    report_.swapped = swapped;
+    if (!(std::abs(same - swapped) > kMargin)) return;
+    // The vote names streams, not "as resolved" or "the other way": the
+    // resolved order can change between two pairs, and the same answer would
+    // then read as its opposite. A vote about another two streams, or naming
+    // the other one, starts the run over.
+    const bool as_resolved = same > swapped;
+    const std::uint64_t eye0 = as_resolved ? slot.eye0_stream : slot.eye1_stream;
+    const std::uint64_t eye1 = as_resolved ? slot.eye1_stream : slot.eye0_stream;
+    const std::uint64_t lower = std::min(eye0, eye1);
+    const std::uint64_t higher = std::max(eye0, eye1);
+    if (run_streams_[0] != lower || run_streams_[1] != higher || run_eye0_ != eye0) {
+        run_streams_[0] = lower;
+        run_streams_[1] = higher;
+        run_eye0_ = eye0;
+        run_ = 0;
+    }
+    if (++run_ < kVotes) return;
+    run_ = 0;
+    ++report_.decided;
+    if (!as_resolved) ++report_.swaps;
+    report_dlss_eye_order_check(eye0, eye1);
 }
 
 }  // namespace xrfg

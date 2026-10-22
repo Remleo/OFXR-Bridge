@@ -1010,6 +1010,61 @@ void upload_pattern(
     });
 }
 
+// The same for a texture of one slice, from that slice's bytes.
+void upload_single_slice(
+    D3D12WarpFixture& fixture,
+    ID3D12Resource* texture,
+    const std::vector<std::uint8_t>& bytes) {
+    require(texture != nullptr, "upload target is null");
+    const D3D12_RESOURCE_DESC description = texture->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+    UINT row_count = 0;
+    UINT64 row_size = 0;
+    UINT64 total_size = 0;
+    fixture.device()->GetCopyableFootprints(
+        &description, 0, 1, 0, &layout, &row_count, &row_size, &total_size);
+    const UINT width = static_cast<UINT>(description.Width);
+    require(description.DepthOrArraySize == 1 &&
+                bytes.size() == static_cast<std::size_t>(width) * description.Height * kBytesPerPixel,
+        "single-slice pattern dimensions do not match the texture");
+    ComPtr<ID3D12Resource> upload = create_buffer(
+        fixture,
+        D3D12_HEAP_TYPE_UPLOAD,
+        total_size,
+        D3D12_RESOURCE_STATE_GENERIC_READ);
+    void* mapped_memory = nullptr;
+    const D3D12_RANGE no_read{0, 0};
+    require_hresult(upload->Map(0, &no_read, &mapped_memory), "ID3D12Resource::Map(single-slice upload)");
+    for (UINT y = 0; y < row_count; ++y) {
+        std::memcpy(static_cast<std::byte*>(mapped_memory) + layout.Offset +
+                        static_cast<std::size_t>(y) * layout.Footprint.RowPitch,
+            bytes.data() + static_cast<std::size_t>(y) * width * kBytesPerPixel,
+            static_cast<std::size_t>(row_size));
+    }
+    upload->Unmap(0, nullptr);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+        const D3D12_RESOURCE_BARRIER to_copy_destination = transition_barrier(
+            texture,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_COPY_DEST);
+        command_list->ResourceBarrier(1, &to_copy_destination);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = upload.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint = layout;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = texture;
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destination.SubresourceIndex = 0;
+        command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        const D3D12_RESOURCE_BARRIER to_render_target = transition_barrier(
+            texture,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+        command_list->ResourceBarrier(1, &to_render_target);
+    });
+}
+
 template <typename MotionForPixel>
 [[nodiscard]] ComPtr<ID3D12Resource> create_and_upload_game_motion_field(
     D3D12WarpFixture& fixture,
@@ -3266,26 +3321,23 @@ void test_dlss_eye_check(D3D12WarpFixture& fixture) {
         }
     }
     // Each eye's tile through a tone map: the tile is scene colour before the
-    // map, the image the picture after it.
+    // map, the image the picture after it. One slice, as the capture copies
+    // it from a DLSS output.
     const auto tile_of = [&](UINT eye, bool flat) {
-        StereoPattern tile;
-        for (UINT slice = 0; slice < kEyeCount; ++slice) {
-            auto& bytes = tile[slice];
-            bytes.assign(std::size_t(tile_width) * tile_height * kBytesPerPixel, 0);
-            for (UINT y = 0; y < tile_height; ++y) {
-                for (UINT x = 0; x < tile_width; ++x) {
-                    const std::uint8_t source =
-                        scene[eye][(std::size_t(tile_y + y) * width + tile_x + x) * kBytesPerPixel];
-                    const std::uint8_t value = flat
-                        ? 128
-                        : static_cast<std::uint8_t>(255.0 * std::pow(source / 255.0, 0.6));
-                    const RgbaBytes t{value, value, value, 255};
-                    std::copy(t.begin(), t.end(),
-                              bytes.begin() + (std::size_t(y) * tile_width + x) * kBytesPerPixel);
-                }
+        std::vector<std::uint8_t> bytes(std::size_t(tile_width) * tile_height * kBytesPerPixel, 0);
+        for (UINT y = 0; y < tile_height; ++y) {
+            for (UINT x = 0; x < tile_width; ++x) {
+                const std::uint8_t source =
+                    scene[eye][(std::size_t(tile_y + y) * width + tile_x + x) * kBytesPerPixel];
+                const std::uint8_t value = flat
+                    ? 128
+                    : static_cast<std::uint8_t>(255.0 * std::pow(source / 255.0, 0.6));
+                const RgbaBytes t{value, value, value, 255};
+                std::copy(t.begin(), t.end(),
+                          bytes.begin() + (std::size_t(y) * tile_width + x) * kBytesPerPixel);
             }
         }
-        return tile;
+        return bytes;
     };
     const auto to_state = [&](ID3D12Resource* texture, D3D12_RESOURCE_STATES from,
                               D3D12_RESOURCE_STATES to) {
@@ -3300,8 +3352,8 @@ void test_dlss_eye_check(D3D12WarpFixture& fixture) {
     constexpr D3D12_RESOURCE_STATES kTileState =
         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     const auto make_tile = [&](UINT eye, bool flat) {
-        auto tile = create_source_texture(fixture, tile_width, tile_height);
-        upload_pattern(fixture, tile.Get(), tile_of(eye, flat));
+        auto tile = create_single_slice_texture(fixture, tile_width, tile_height);
+        upload_single_slice(fixture, tile.Get(), tile_of(eye, flat));
         to_state(tile.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, kTileState);
         return tile;
     };
@@ -3378,6 +3430,55 @@ void test_dlss_eye_check(D3D12WarpFixture& fixture) {
     report = check.report();
     require(report.compared == 3 * votes && report.decided == 2,
         "a flat tile moved the eyes");
+    const std::span<const xrfg::D3D12ReprojectionView> view_span{views.data(), views.size()};
+    // A slot's finished comparison is read before the slot is recorded over,
+    // with no poll in between.
+    const auto compared_before = check.report().compared;
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        check.record(list, 0, image.Get(), view_span, as_resolved);
+    });
+    require_hresult(fence->Signal(++completed), "eye check fence signal");
+    check.submitted(0, fence.Get(), completed);
+    compare(as_resolved);
+    require(check.report().compared == compared_before + 2,
+        "a slot recorded again lost the comparison it held unread");
+    // Comparisons are read in the order they were recorded, not the slots'.
+    // Four pairs have named 7001; slot 7 then names 7002 and slot 0, recorded
+    // after it, 7001 again. Read in order, each breaks the other's run and
+    // nothing is told; slot 0 read first would have been the fifth vote.
+    compare(as_resolved);
+    compare(as_resolved);
+    const auto decided_before = check.report().decided;
+    const auto other_way = set_of(frame_with(7001, right_tile), frame_with(7002, left_tile));
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        check.record(list, 7, image.Get(), view_span, other_way);
+    });
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        check.record(list, 0, image.Get(), view_span, as_resolved);
+    });
+    require_hresult(fence->Signal(++completed), "eye check fence signal");
+    check.submitted(7, fence.Get(), completed);
+    check.submitted(0, fence.Get(), completed);
+    check.poll();
+    require(check.report().compared == compared_before + 6 &&
+                check.report().decided == decided_before,
+        "comparisons read out of the order they were recorded made a run");
+    // A run is about two streams: four votes for one pair and one for another
+    // tell nothing, and the other pair needs five of its own. Slot 0 above
+    // was the first of the four.
+    for (UINT pair = 2; pair < votes; ++pair) compare(as_resolved);
+    const auto other_pair = set_of(frame_with(8001, left_tile), frame_with(8002, right_tile));
+    compare(other_pair);
+    require(check.report().decided == decided_before,
+        "votes about one pair of streams decided another");
+    for (UINT pair = 1; pair < votes; ++pair) compare(other_pair);
+    require(check.report().decided == decided_before + 1,
+        "five votes about a new pair of streams decided nothing");
+    {
+        const auto statistics = xrfg::dlss_motion_vector_statistics();
+        require(statistics.eye_check_stream == 8001,
+            "the new pair's eyes did not reach the guide registry");
+    }
     fixture.require_no_debug_errors();
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -3482,6 +3583,26 @@ void test_dlss_motion_vector_evaluation_order(D3D12WarpFixture& fixture) {
         const auto checked = xrfg::dlss_motion_vector_statistics();
         require(checked.eye_check_decisions == 2 && checked.eye_check_stream == 101,
             "the image checks were not counted in the statistics");
+    }
+    // An order that settles against the images' word clears it, as after a
+    // level load that turned the features round while a dark loading screen
+    // gives the images nothing to say; one that settles with it keeps it.
+    xrfg::report_dlss_eye_order_check(202, 101);
+    require(eye0() == 202, "the images' third word did not move eye 0");
+    for (int count = 0; count < 30; ++count) {
+        frame(202, 101);
+        require(eye0() == 202, "an order settling with the images' word moved eye 0");
+    }
+    for (int count = 0; count < 30; ++count) {
+        frame(101, 202);
+        require(eye0() == (count < 29 ? 202ULL : 101ULL),
+            count < 29 ? "fewer than thirty frames against the images' word moved eye 0"
+                       : "an order settled against the images' word did not clear it");
+    }
+    {
+        const auto settled = xrfg::dlss_motion_vector_statistics();
+        require(settled.eye_order_decisions == 4 && settled.eye_order_stream == 101,
+            "the orders settled with and against the images' word were not counted");
     }
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(101);

@@ -60,18 +60,20 @@ namespace {
 
 [[nodiscard]] std::filesystem::path current_layer_directory() noexcept;
 
-// Which DLSS stream is eye 0 is decided from the streams' evaluation order
-// (dlss_motion_vectors.cpp): a level load can give two streams each other's
-// eyes, and until the new order has held the eyes take each other's guides.
-// Each decision goes to the NGX capture log, always, and to the flight log
-// when it records, with how long the deciding order had held and how long
-// the pair had been seen: the measure of what that wait costs.
+// Which DLSS stream is eye 0 is decided from the streams' evaluation order and
+// from the images (dlss_motion_vectors.cpp, D3D12EyeCheck): a level load can
+// give two streams each other's eyes, and until a decision the eyes take each
+// other's guides. Each decision goes to the NGX capture log, always, and to the
+// flight log when it records, with how long the deciding order had held and
+// how long the pair had been seen: the measure of what that wait costs. The
+// counts are exchanged on every call, zero included: tracking configured again
+// starts the statistics over, and the new run's first decision is logged too.
 void note_dlss_eye_order() noexcept {
     static std::atomic<std::uint64_t> logged{0};
     static std::atomic<std::uint64_t> checks_logged{0};
     const auto statistics = xrfg::dlss_motion_vector_statistics();
     const std::uint64_t decisions = statistics.eye_order_decisions;
-    if (decisions != 0 && logged.exchange(decisions) != decisions) {
+    if (logged.exchange(decisions) != decisions && decisions != 0) {
         xrfg::log_ngx_guide_event("eye_order", statistics.eye_order_stream,
             statistics.eye_order_run_ms, statistics.eye_order_pair_ms, decisions);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_eye_order,
@@ -79,7 +81,7 @@ void note_dlss_eye_order() noexcept {
             statistics.eye_order_run_ms, statistics.eye_order_pair_ms);
     }
     const std::uint64_t checks = statistics.eye_check_decisions;
-    if (checks != 0 && checks_logged.exchange(checks) != checks) {
+    if (checks_logged.exchange(checks) != checks && checks != 0) {
         xrfg::log_ngx_guide_event("eye_check", statistics.eye_check_stream,
             statistics.eye_check_pair_ms, 0, checks);
         xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_eye_check,
@@ -678,6 +680,10 @@ struct PlacedLayerSnapshot {
     XrStructureType type{};
     XrSpace space{XR_NULL_HANDLE};
     XrSwapchain swapchain{XR_NULL_HANDLE};
+    // The part of the swapchain it shows: panels can share one and differ
+    // only by their array slice or rectangle.
+    std::uint32_t array_index{};
+    XrRect2Di rect{};
     XrPosef pose{};
 };
 
@@ -11722,11 +11728,13 @@ enqueue_presenter_submission(
         if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
             const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(layer);
             snapshot.placed_layers.push_back({layer_index, layer->type, quad->space,
-                quad->subImage.swapchain, quad->pose});
+                quad->subImage.swapchain, quad->subImage.imageArrayIndex,
+                quad->subImage.imageRect, quad->pose});
         } else if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR) {
             const auto* cylinder = reinterpret_cast<const XrCompositionLayerCylinderKHR*>(layer);
             snapshot.placed_layers.push_back({layer_index, layer->type, cylinder->space,
-                cylinder->subImage.swapchain, cylinder->pose});
+                cylinder->subImage.swapchain, cylinder->subImage.imageArrayIndex,
+                cylinder->subImage.imageRect, cylinder->pose});
         }
         if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
             continue;
@@ -12285,19 +12293,32 @@ constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
         // drawn part of the way there, so it moved in steps at the game's
         // frame rate and led the scene by a frame: from the headset, a jerky
         // reticle over a smooth world (STALKER 2 under UEVR, whose reticle is a
-        // stage-space quad). One whose space, image or kind changed, or that
-        // turned or moved more than a head does in a frame, keeps the newer
-        // pose, as the views do; so does one with no counterpart.
+        // stage-space quad). Its counterpart is the previous frame's panel of
+        // the same kind, space and sub-image - swapchain, array slice and
+        // rectangle - and, of several such, the one at the same place in the
+        // frame. One with no counterpart, or several none of which is at its
+        // place, or that turned or moved more than a head does in a frame,
+        // keeps the newer pose, as the views do.
         for (PlacedLayerSnapshot& placed : camera.placed_layers) {
-            const auto previous_placed = std::find_if(
-                previous.placed_layers.begin(),
-                previous.placed_layers.end(),
-                [&](const PlacedLayerSnapshot& candidate) {
-                    return candidate.type == placed.type &&
-                           candidate.space == placed.space &&
-                           candidate.swapchain == placed.swapchain;
-                });
-            if (previous_placed == previous.placed_layers.end()) {
+            const PlacedLayerSnapshot* previous_placed = nullptr;
+            std::size_t counterparts = 0;
+            for (const PlacedLayerSnapshot& candidate : previous.placed_layers) {
+                if (candidate.type != placed.type || candidate.space != placed.space ||
+                    candidate.swapchain != placed.swapchain ||
+                    candidate.array_index != placed.array_index ||
+                    candidate.rect.offset.x != placed.rect.offset.x ||
+                    candidate.rect.offset.y != placed.rect.offset.y ||
+                    candidate.rect.extent.width != placed.rect.extent.width ||
+                    candidate.rect.extent.height != placed.rect.extent.height) {
+                    continue;
+                }
+                ++counterparts;
+                if (previous_placed == nullptr || candidate.layer_index == placed.layer_index) {
+                    previous_placed = &candidate;
+                }
+            }
+            if (previous_placed == nullptr ||
+                (counterparts > 1 && previous_placed->layer_index != placed.layer_index)) {
                 continue;
             }
             const xrfg::Pose from = to_pose(previous_placed->pose);
