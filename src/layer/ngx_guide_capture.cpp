@@ -183,6 +183,7 @@ void capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     g.reset=get<int>(p,NVSDK_NGX_Parameter_Reset)!=0;
     g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    g.copy_output_tile=true;
     g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
     {
         float given{};
@@ -446,6 +447,9 @@ void update_ngx_guide_depth(float near_z,float far_z,float min_depth,float max_d
     s.camera_from_xr=true;
     s.camera_ready=true;
 }
+void log_ngx_guide_event(const char* message,UINT64 a,UINT64 b,UINT64 c,UINT64 d) noexcept {
+    try { log(message,a,b,c,d); } catch(...) {}
+}
 } // namespace xrfg
 #else
 namespace xrfg {
@@ -453,5 +457,6 @@ void configure_ngx_guide_capture(ID3D12CommandQueue*,bool) noexcept {}
 void stop_ngx_guide_capture(ID3D12CommandQueue*) noexcept {}
 void update_ngx_guide_depth(float,float,float,float) noexcept {}
 void prepare_ngx_feature_discovery(const wchar_t*) noexcept {}
+void log_ngx_guide_event(const char*,UINT64,UINT64,UINT64,UINT64) noexcept {}
 }
 #endif

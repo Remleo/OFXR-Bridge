@@ -5,6 +5,7 @@
 #include <fstream>
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
+#include "xrfg/d3d12_eye_check.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/frame_dump.hpp"
 #include <map>
@@ -3173,6 +3174,321 @@ void test_guide_composer(D3D12WarpFixture& fixture) {
     require(composer.composed() == 2, "the composer's count did not follow the bridged eyes");
 }
 
+// The output tiles the eye check compares are copied in bursts: a stream's
+// first publication opens one, so does a reset, and otherwise one opens every
+// two seconds; a publication outside a burst copies no tile.
+void test_dlss_output_tile_bursts(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    constexpr UINT width = 64;
+    constexpr UINT height = 32;
+    const auto create_texture = [&](UINT texture_width, UINT texture_height) {
+        D3D12_RESOURCE_DESC description =
+            stereo_texture_description(texture_width, texture_height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> texture;
+        require_hresult(fixture.device()->CreateCommittedResource(
+            &properties, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(texture.GetAddressOf())),
+            "create tile-burst DLSS texture");
+        return texture;
+    };
+    const auto output = create_texture(width, height);
+    const auto motion = create_texture(width / 2, height / 2);
+    const auto publish = [&](bool reset) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            xrfg::DlssMotionVectorPublication publication{};
+            publication.stream = 303;
+            publication.output = output.Get();
+            publication.motion_vectors = motion.Get();
+            publication.producer_queue = fixture.queue();
+            publication.producer_command_list = command_list;
+            publication.output_width = width;
+            publication.output_height = height;
+            publication.motion_width = width / 2;
+            publication.motion_height = height / 2;
+            publication.resource_state = D3D12_RESOURCE_STATE_COMMON;
+            publication.reset = reset;
+            publication.copy_output_tile = true;
+            publication.output_resource_state = D3D12_RESOURCE_STATE_COMMON;
+            xrfg::publish_dlss_motion_vectors(publication);
+        });
+        return xrfg::dlss_motion_vector_statistics().tile_copies;
+    };
+    require(publish(false) == 1, "a stream's first publication did not copy its output tile");
+    require(publish(false) == 2, "the second publication of the burst did not copy its tile");
+    Sleep(400);
+    require(publish(false) == 2, "a publication outside a burst copied a tile");
+    require(publish(true) == 3, "a reset did not open a burst");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(303);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+}
+
+// Which stream made which eye's image, read from the images (D3D12EyeCheck):
+// two eyes of a scene whose near square sits thirty pixels further right in
+// the right eye, and a tile cut from each eye's lower middle through a tone
+// map of its own. Paired as resolved, the images confirm the eyes after five
+// pairs; paired the other way round, they move them; a flat tile decides
+// nothing.
+void test_dlss_eye_check(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    constexpr UINT width = 256, height = 128;
+    constexpr UINT tile_x = width * 3 / 8, tile_y = height * 9 / 16;
+    constexpr UINT tile_width = width / 4, tile_height = height / 8;
+    constexpr int parallax = 30;
+    // A near checkered square over a textured far background, further right
+    // in the right eye by the parallax.
+    const auto texel = [&](UINT x, UINT y, UINT eye) {
+        const int left = 100 + (eye == 1 ? parallax : 0);
+        // ("near" is a macro of the Windows headers.)
+        const bool close_by = int(x) >= left && int(x) < left + 40 && y >= tile_y + 2 &&
+            y < tile_y + tile_height - 2;
+        const std::uint8_t value = close_by
+            ? ((x / 4 + y / 4) % 2 == 0 ? 230 : 40)
+            : static_cast<std::uint8_t>(90 + ((x * 7 + y * 13) % 80));
+        return RgbaBytes{value, value, value, 255};
+    };
+    StereoPattern scene;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        auto& bytes = scene[eye];
+        bytes.assign(std::size_t(width) * height * kBytesPerPixel, 0);
+        for (UINT y = 0; y < height; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const auto t = texel(x, y, eye);
+                std::copy(t.begin(), t.end(),
+                          bytes.begin() + (std::size_t(y) * width + x) * kBytesPerPixel);
+            }
+        }
+    }
+    // Each eye's tile through a tone map: the tile is scene colour before the
+    // map, the image the picture after it.
+    const auto tile_of = [&](UINT eye, bool flat) {
+        StereoPattern tile;
+        for (UINT slice = 0; slice < kEyeCount; ++slice) {
+            auto& bytes = tile[slice];
+            bytes.assign(std::size_t(tile_width) * tile_height * kBytesPerPixel, 0);
+            for (UINT y = 0; y < tile_height; ++y) {
+                for (UINT x = 0; x < tile_width; ++x) {
+                    const std::uint8_t source =
+                        scene[eye][(std::size_t(tile_y + y) * width + tile_x + x) * kBytesPerPixel];
+                    const std::uint8_t value = flat
+                        ? 128
+                        : static_cast<std::uint8_t>(255.0 * std::pow(source / 255.0, 0.6));
+                    const RgbaBytes t{value, value, value, 255};
+                    std::copy(t.begin(), t.end(),
+                              bytes.begin() + (std::size_t(y) * tile_width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return tile;
+    };
+    const auto to_state = [&](ID3D12Resource* texture, D3D12_RESOURCE_STATES from,
+                              D3D12_RESOURCE_STATES to) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            const auto barrier = transition_barrier(texture, from, to);
+            list->ResourceBarrier(1, &barrier);
+        });
+    };
+    auto image = create_source_texture(fixture, width, height);
+    upload_pattern(fixture, image.Get(), scene);
+    to_state(image.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+    constexpr D3D12_RESOURCE_STATES kTileState =
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    const auto make_tile = [&](UINT eye, bool flat) {
+        auto tile = create_source_texture(fixture, tile_width, tile_height);
+        upload_pattern(fixture, tile.Get(), tile_of(eye, flat));
+        to_state(tile.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, kTileState);
+        return tile;
+    };
+    const auto left_tile = make_tile(0, false);
+    const auto right_tile = make_tile(1, false);
+    const auto flat_tile = make_tile(0, true);
+    const auto frame_with = [&](std::uint64_t stream, const ComPtr<ID3D12Resource>& tile) {
+        auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+        f->stream = stream;
+        f->output_width = width;
+        f->output_height = height;
+        f->output_tile = tile;
+        f->output_tile_x = tile_x;
+        f->output_tile_y = tile_y;
+        f->output_tile_width = tile_width;
+        f->output_tile_height = tile_height;
+        return f;
+    };
+    const auto set_of = [&](std::shared_ptr<xrfg::DlssMotionVectorFrame> eye0,
+                            std::shared_ptr<xrfg::DlssMotionVectorFrame> eye1) {
+        xrfg::DlssMotionVectorSet set{};
+        set.eye_count = 2;
+        set.eyes[0] = std::move(eye0);
+        set.eyes[1] = std::move(eye1);
+        return set;
+    };
+    const auto views = make_reprojection_views();
+    xrfg::D3D12EyeCheck check;
+    require_hresult(check.initialize(fixture.device(), kFormat), "eye check initialization");
+    ComPtr<ID3D12Fence> fence;
+    require_hresult(fixture.device()->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+                                                  IID_PPV_ARGS(fence.GetAddressOf())),
+                    "eye check fence");
+    std::uint64_t completed = 0;
+    const auto compare = [&](const xrfg::DlssMotionVectorSet& set) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            check.record(list, 0, image.Get(), {views.data(), views.size()}, set);
+        });
+        require_hresult(fence->Signal(++completed), "eye check fence signal");
+        check.submitted(0, fence.Get(), completed);
+        check.poll();
+    };
+    constexpr UINT votes = xrfg::D3D12EyeCheck::kVotes;
+    constexpr float margin = xrfg::D3D12EyeCheck::kMargin;
+    // As resolved: stream 7001 made the left eye's image, 7002 the right's.
+    const auto as_resolved = set_of(frame_with(7001, left_tile), frame_with(7002, right_tile));
+    for (UINT pair = 0; pair < votes; ++pair) compare(as_resolved);
+    auto report = check.report();
+    require(report.compared == votes && report.decided == 1 && report.swaps == 0 &&
+                report.same > report.swapped + margin,
+        "the images did not confirm the eyes as resolved");
+    {
+        const auto statistics = xrfg::dlss_motion_vector_statistics();
+        require(statistics.eye_check_decisions == 1 && statistics.eye_check_stream == 7001,
+            "the images' confirmation did not reach the guide registry");
+    }
+    // The other way round: each eye given the other's stream.
+    const auto swapped = set_of(frame_with(7002, right_tile), frame_with(7001, left_tile));
+    for (UINT pair = 0; pair < votes; ++pair) compare(swapped);
+    report = check.report();
+    require(report.compared == 2 * votes && report.decided == 2 && report.swaps == 1 &&
+                report.swapped > report.same + margin,
+        "the images did not move the eyes given each other's streams");
+    {
+        // The registry already had 7001 as eye 0 from the images: the same
+        // word again counts no new decision.
+        const auto statistics = xrfg::dlss_motion_vector_statistics();
+        require(statistics.eye_check_decisions == 1 && statistics.eye_check_stream == 7001,
+            "the images' swap did not keep eye 0 on the stream that made it");
+    }
+    // A flat tile decides nothing.
+    const auto flat = set_of(frame_with(7001, flat_tile), frame_with(7002, flat_tile));
+    for (UINT pair = 0; pair < votes; ++pair) compare(flat);
+    report = check.report();
+    require(report.compared == 3 * votes && report.decided == 2,
+        "a flat tile moved the eyes");
+    fixture.require_no_debug_errors();
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+}
+
+// Two streams at the same input position, first seen left then right, then
+// the right one evaluated first on every frame: what STALKER 2 under UEVR's
+// Native Stereo Fix does from a level load on, the same two features with the
+// eyes swapped. One reversed frame keeps first seen; thirty in a row give eye
+// 0 to the stream evaluated first, and thirty of the old order give it back.
+// An order that alternates never moves it.
+void test_dlss_motion_vector_evaluation_order(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    constexpr UINT width = 64;
+    constexpr UINT height = 32;
+    const auto create_texture = [&](UINT texture_width, UINT texture_height) {
+        D3D12_RESOURCE_DESC description =
+            stereo_texture_description(texture_width, texture_height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> texture;
+        require_hresult(fixture.device()->CreateCommittedResource(
+            &properties, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(texture.GetAddressOf())),
+            "create evaluation-order DLSS texture");
+        return texture;
+    };
+    const auto left_output = create_texture(width, height);
+    const auto right_output = create_texture(width, height);
+    const auto motion = create_texture(width / 2, height / 2);
+    const auto packed_xr_output = create_texture(width * 2, height);
+    const auto output_of = [&](std::uint64_t stream) {
+        return stream == 101 ? left_output.Get() : right_output.Get();
+    };
+    // One frame: both eyes evaluated, in the order given.
+    const auto frame = [&](std::uint64_t first, std::uint64_t second) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            for (const auto stream : {first, second}) {
+                xrfg::publish_dlss_motion_vectors({
+                    stream, output_of(stream), motion.Get(), fixture.queue(), 0, 0, width,
+                    height, 0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                    D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+            }
+        });
+    };
+    const auto eye0 = [&]() {
+        const auto resolved =
+            xrfg::resolve_dlss_motion_vectors(packed_xr_output.Get(), fixture.queue());
+        require(resolved && resolved->eye_count == 2 && resolved->eyes[0] && resolved->eyes[1],
+            "the packed stereo image did not resolve two streams");
+        return resolved->eyes[0]->stream;
+    };
+    frame(101, 202);
+    require(eye0() == 101, "first seen did not give eye 0 to the stream seen first");
+    for (int count = 1; count < 30; ++count) {
+        frame(202, 101);
+        require(eye0() == 101, "fewer than thirty reversed frames moved eye 0");
+    }
+    frame(202, 101);
+    require(eye0() == 202,
+        "thirty frames of the other stream evaluated first did not move eye 0 to it");
+    {
+        const auto timed = xrfg::dlss_motion_vector_statistics();
+        require(timed.eye_order_decisions == 1 && timed.eye_order_stream == 202 &&
+                timed.eye_order_pair_ms >= timed.eye_order_run_ms,
+            "the eye-order decision was not counted and timed in the statistics");
+    }
+    frame(101, 202);
+    require(eye0() == 202, "one frame of the old order moved eye 0 back");
+    for (int count = 0; count < 20; ++count) {
+        frame(101, 202);
+        require(eye0() == 202, "an alternating order moved eye 0");
+        frame(202, 101);
+        require(eye0() == 202, "an alternating order moved eye 0");
+    }
+    // The order is read where the images resolve, every frame, as in a game.
+    for (int count = 0; count < 30; ++count) {
+        frame(101, 202);
+        require(eye0() == (count < 29 ? 202ULL : 101ULL),
+            count < 29 ? "fewer than thirty frames of the old order moved eye 0 back"
+                       : "thirty frames of the old order did not give eye 0 back");
+    }
+    {
+        const auto timed = xrfg::dlss_motion_vector_statistics();
+        require(timed.eye_order_decisions == 2 && timed.eye_order_stream == 101,
+            "the second eye-order decision was not counted in the statistics");
+    }
+    // The images' word outranks the order's, and holds through thirty frames
+    // of the order it contradicts; only the images change it back.
+    xrfg::report_dlss_eye_order_check(202, 101);
+    require(eye0() == 202, "the images' eye order did not outrank the evaluation order");
+    for (int count = 0; count < 30; ++count) {
+        frame(101, 202);
+        require(eye0() == 202, "the evaluation order overrode the images' eye order");
+    }
+    xrfg::report_dlss_eye_order_check(101, 202);
+    require(eye0() == 101, "the images' second word did not move eye 0");
+    {
+        const auto checked = xrfg::dlss_motion_vector_statistics();
+        require(checked.eye_check_decisions == 2 && checked.eye_check_stream == 101,
+            "the image checks were not counted in the statistics");
+    }
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(101);
+    xrfg::retire_dlss_motion_vector_stream(202);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+}
+
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(true);
     constexpr UINT width = 64;
@@ -3230,7 +3546,9 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
         "double-wide UEVR colour did not retain independent mono eye guide mappings");
 
     // Publish in the opposite order. Eye assignment must remain tied to the
-    // stable first-seen stream order, not to this frame's evaluation order.
+    // stable first-seen stream order, not to one frame's evaluation order
+    // (an order that holds for thirty frames does move it:
+    // test_dlss_motion_vector_evaluation_order).
     fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
         xrfg::publish_dlss_motion_vectors({
             202, right_output.Get(), motion.Get(), fixture.queue(), 0, 0, width, height,
@@ -6999,6 +7317,9 @@ int main() {
             D3D12WarpFixture guides_fixture;
             test_dlss_motion_vector_stereo_stream_pairing(guides_fixture);
             test_dlss_motion_vector_per_eye_swapchains(guides_fixture);
+            test_dlss_motion_vector_evaluation_order(guides_fixture);
+            test_dlss_output_tile_bursts(guides_fixture);
+            test_dlss_eye_check(guides_fixture);
             test_guide_composer(guides_fixture);
             std::cout << "guide tests passed" << std::endl;
             return 0;
@@ -7073,6 +7394,9 @@ int main() {
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
         test_dlss_motion_vector_per_eye_swapchains(fixture);
+        test_dlss_motion_vector_evaluation_order(fixture);
+        test_dlss_output_tile_bursts(fixture);
+        test_dlss_eye_check(fixture);
         test_guide_composer(fixture);
         test_dlss_guide_snapshots_copy_only_the_read_region(fixture);
         test_dlss_motion_vector_gpu_ingress(fixture);

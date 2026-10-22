@@ -60,6 +60,34 @@ namespace {
 
 [[nodiscard]] std::filesystem::path current_layer_directory() noexcept;
 
+// Which DLSS stream is eye 0 is decided from the streams' evaluation order
+// (dlss_motion_vectors.cpp): a level load can give two streams each other's
+// eyes, and until the new order has held the eyes take each other's guides.
+// Each decision goes to the NGX capture log, always, and to the flight log
+// when it records, with how long the deciding order had held and how long
+// the pair had been seen: the measure of what that wait costs.
+void note_dlss_eye_order() noexcept {
+    static std::atomic<std::uint64_t> logged{0};
+    static std::atomic<std::uint64_t> checks_logged{0};
+    const auto statistics = xrfg::dlss_motion_vector_statistics();
+    const std::uint64_t decisions = statistics.eye_order_decisions;
+    if (decisions != 0 && logged.exchange(decisions) != decisions) {
+        xrfg::log_ngx_guide_event("eye_order", statistics.eye_order_stream,
+            statistics.eye_order_run_ms, statistics.eye_order_pair_ms, decisions);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_eye_order,
+            static_cast<std::int64_t>(decisions), statistics.eye_order_stream,
+            statistics.eye_order_run_ms, statistics.eye_order_pair_ms);
+    }
+    const std::uint64_t checks = statistics.eye_check_decisions;
+    if (checks != 0 && checks_logged.exchange(checks) != checks) {
+        xrfg::log_ngx_guide_event("eye_check", statistics.eye_check_stream,
+            statistics.eye_check_pair_ms, 0, checks);
+        xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_eye_check,
+            static_cast<std::int64_t>(checks), statistics.eye_check_stream,
+            statistics.eye_check_pair_ms, 0);
+    }
+}
+
 namespace optiscaler_bootstrap {
 
 using ProviderIdentity = int (*)(OFXR_OptiScalerProviderIdentityV2*);
@@ -8224,6 +8252,7 @@ XrResult release_swapchain_image_locked(
                         ? state->session->eye_release_publication[1 - eye].load(
                               std::memory_order_relaxed)
                         : 0);
+                note_dlss_eye_order();
             }
         }
         xrfg::D3D12HistoryCaptureTicket ticket{};
@@ -8528,6 +8557,7 @@ void capture_pending_end_frame_images(
                                 ? session->eye_release_publication[1 - eye].load(
                                       std::memory_order_relaxed)
                                 : 0);
+                        note_dlss_eye_order();
                     }
                 }
                 xrfg::D3D12HistoryCaptureWait wait{};
